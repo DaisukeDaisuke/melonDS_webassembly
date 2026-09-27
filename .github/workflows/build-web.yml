@@ -23,6 +23,8 @@ jobs:
           npm ci --ignore-scripts
           cd ../../..
           node web/scripts/build-workers.mjs
+      - name: Generate same-origin DQ9 WFC dummy certificates
+        run: bash web/dq9/generate-certs.sh
       - name: Check frontend
         run: node --test web/tests/*.test.js
       - name: Upload WebAssembly and UI

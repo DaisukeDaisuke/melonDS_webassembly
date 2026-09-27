@@ -29,6 +29,11 @@ int WebNetEnqueue(int instanceId, const u8* data, int length) {
     netPending[instanceId].push_back(frame);
     return length;
 }
+void WebNetClear(int instanceId) {
+    if (instanceId < 0 || instanceId >= 16) return;
+    std::lock_guard<std::mutex> lock(netLock);
+    netPending[instanceId].clear();
+}
 int WebNetDrain(WebNetFrame* out, int capacity, u32* dropped) {
     if (!out || capacity < 0) return -1;
     std::lock_guard<std::mutex> lock(netLock);

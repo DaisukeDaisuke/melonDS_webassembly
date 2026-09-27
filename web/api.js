@@ -13,17 +13,23 @@ const METHODS = Object.freeze({
   reset: 'instance', step: 'instance', stepOver: 'instance', runUntil: 'instance',
   loadRom: 'instance', loadState: 'instance', saveState: 'instance',
   exportState: 'instance', importSave: 'instance', exportSave: 'instance',
+  saveStateToBrowser: 'instance', loadStateFromBrowser: 'instance',
+  saveSaveToBrowser: 'instance', loadSaveFromBrowser: 'instance', listBrowserStates: 'instance',
   getRegisters: 'instance', setRegister: 'instance', readMemory: 'instance',
   writeMemory: 'instance', memorySearch: 'instance', memoryFreeze: 'instance',
   listMemoryFreezes: 'instance', removeMemoryFreeze: 'instance',
   disassemble: 'instance', addBreakpoint: 'instance',
   removeBreakpoint: 'instance', listBreakpoints: 'instance', input: 'instance',
+  startInputRecording: 'instance', stopInputRecording: 'instance', getInputRecording: 'instance',
+  inputSequence: 'instance', stopInputSequence: 'instance',
   screenshot: 'instance', localCommLog: 'instance', wifiLog: 'instance',
+  captureFrame: 'instance', compareFrames: 'instance',
   injectNetworkFrame: 'instance',
   runScript: 'instance', startPersistentScript: 'instance',
   stopPersistentScript: 'instance', restartPersistentScript: 'instance',
   listPersistentScripts: 'instance', callPersistentScriptMcp: 'instance',
-  batch: 'instance', operationStatus: 'instance', cancelOperation: 'instance'
+  batch: 'instance', operationStatus: 'instance', cancelOperation: 'instance',
+  waitFrames: 'instance', waitMemory: 'instance'
 });
 
 // The backend must acknowledge completed operations, not queued requests.
@@ -45,6 +51,11 @@ export function createApi(backend) {
       const operation = operations.get(args.operationId);
       if (!operation || !operation.ids.includes(args.instanceId)) throw new Error('Operation not found for this instance');
       if (name === 'operationStatus') return Promise.resolve({ operationId: args.operationId, status: operation.status });
+      if (operation.status === 'running' && operation.controller) {
+        operation.controller.abort();
+        return operation.promise.then(() => ({ operationId: args.operationId, cancelled: false, status: operation.status }),
+          () => ({ operationId: args.operationId, cancelled: operation.status === 'cancelled', status: operation.status }));
+      }
       if (operation.status !== 'queued') return Promise.resolve({ operationId: args.operationId, cancelled: false, status: operation.status });
       operation.cancelled = true;
       return operation.promise.then(() => ({ operationId: args.operationId, cancelled: false, status: operation.status }),
@@ -72,7 +83,8 @@ export function createApi(backend) {
       if (typeof args.operationId !== 'string' || !args.operationId || args.operationId.length > 100 || operations.has(args.operationId)) {
         throw new TypeError('operationId must be a unique nonempty string of at most 100 characters');
       }
-      entry = { ids, status: 'queued', cancelled: false };
+      entry = { ids, status: 'queued', cancelled: false,
+        controller: ['waitFrames', 'waitMemory'].includes(name) ? new AbortController() : null };
       operations.set(args.operationId, entry);
       if (operations.size > 512) {
         for (const [key, record] of operations) {
@@ -88,16 +100,21 @@ export function createApi(backend) {
     const operation = prior.then(() => {
       if (entry?.cancelled) throw new Error('Operation cancelled before execution');
       if (entry) entry.status = 'running';
-      return backend.execute(name, args);
+      return backend.execute(name, entry?.controller ? { ...args, signal: entry.controller.signal } : args);
     }).then(result => {
       if (entry) entry.status = 'completed';
       return result;
     }, error => {
-      if (entry) entry.status = entry.cancelled ? 'cancelled' : 'failed';
+      if (entry) entry.status = entry.cancelled || entry.controller?.signal.aborted ? 'cancelled' : 'failed';
       throw error;
     });
     if (entry) entry.promise = operation;
-    for (const id of ids) tails.set(id, operation);
+    // Observational waiters must not hold the instance queue: gameplay input
+    // and network replies need to remain executable while a waiter is pending.
+    if (!['waitFrames', 'waitMemory', 'runUntil', 'stepOver', 'step',
+      'injectNetworkFrame', 'runScript', 'callPersistentScriptMcp'].includes(name)) {
+      for (const id of ids) tails.set(id, operation);
+    }
     return operation;
   };
 

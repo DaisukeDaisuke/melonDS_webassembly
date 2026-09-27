@@ -4,6 +4,7 @@ import { createScriptBackend } from './script-service.js';
 import { loadLayout, saveLayout, makeTile, TILE_TYPES, LABELS } from './layout.js';
 import { registerWebMcp } from './webmcp.js';
 import { createVirtualNetwork } from './virtual-network.js';
+import { renderFileExplorer } from './file-explorer.js';
 
 const $ = selector => document.querySelector(selector);
 const workspace = $('#workspace');
@@ -13,12 +14,17 @@ const api = createApi(backend);
 const state = { instances: [], logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
 globalThis.melonds = api;
 globalThis.melondsVirtualNetwork = createVirtualNetwork(api);
+globalThis.melondsFiles = globalThis.melondsVirtualNetwork.files;
 
 function errorMessage(error) {
   $('#notice').textContent = error?.message || String(error);
   $('#notice').hidden = false;
 }
 function save() { saveLayout(layout); }
+function updateScreenTargets() {
+  backend.setScreenTargets([...new Set(layout.tiles.filter(tile => tile.type === 'screen' && !tile.minimized)
+    .map(tile => tile.instanceId))]);
+}
 function apply(target, callback) {
   const button = target instanceof HTMLElement ? target : null;
   if (button) button.disabled = true;
@@ -89,7 +95,7 @@ function refreshSummary() {
 function addTile(type, x, y) {
   const top = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1;
   const tile = makeTile(type, { x: Math.max(0, x), y: Math.max(0, y), z: top });
-  layout.tiles.push(tile); save(); renderTile(tile); refreshSummary();
+  layout.tiles.push(tile); save(); renderTile(tile); refreshSummary(); updateScreenTargets();
 }
 function renderLog(body, tile) {
   const controls = row(body);
@@ -129,6 +135,9 @@ function renderLog(body, tile) {
 
 function renderBody(body, tile, tileElement) {
   const args = extra => ({ instanceId: tile.instanceId, cpu: tile.cpu, ...extra });
+  if (tile.type === 'files') return renderFileExplorer(body, {
+    files: globalThis.melondsFiles, tile, save, onError: errorMessage
+  });
   if (tile.type === 'screen') {
     const stack = el('div', 'screens');
     const top = el('canvas'); const bottom = el('canvas');
@@ -157,6 +166,8 @@ function renderBody(body, tile, tileElement) {
     const address = textInput(controls, '到達PC (hex)', '02000000');
     act('指定位置まで', () => api.runUntil(args({ address: hex(address) })));
     act('状態取得', () => api.status(args()));
+    const frames = textInput(controls, '待つフレーム数', '60');
+    act('フレーム待機', () => api.waitFrames(args({ frames: Number(frames.value) })));
   } else if (tile.type === 'memory') {
     const address = textInput(controls, '開始アドレス (hex)', '02000000');
     const length = textInput(controls, '長さ (byte)', '64');
@@ -166,6 +177,7 @@ function renderBody(body, tile, tileElement) {
     act('検索', () => api.memorySearch(args({ address: hex(address), length: Number(length.value), pattern: bytes(content) })));
     act('固定', () => api.memoryFreeze(args({ address: hex(address), data: bytes(content) })));
     act('固定解除', () => api.removeMemoryFreeze(args({ address: hex(address) })));
+    act('値を待つ', () => api.waitMemory(args({ address: hex(address), pattern: bytes(content) })));
   } else if (tile.type === 'registers') {
     act('レジスタ取得', () => api.getRegisters(args()));
     const name = textInput(controls, 'レジスタ名', 'r0');
@@ -180,6 +192,11 @@ function renderBody(body, tile, tileElement) {
     act('削除', () => api.removeBreakpoint(args({ address: hex(address) })));
     act('一覧', () => api.listBreakpoints(args()));
   } else if (tile.type === 'input') {
+    act('記録開始', () => api.startInputRecording(args()));
+    act('記録停止', () => api.stopInputRecording(args()));
+    act('入力履歴', () => api.getInputRecording(args()));
+    act('記録を再生', async () => api.inputSequence(args({ events: await api.getInputRecording(args()) })));
+    act('再生停止', () => api.stopInputSequence(args()));
     for (const key of ['A', 'B', 'X', 'Y', 'L', 'R', 'START', 'SELECT', 'UP', 'DOWN', 'LEFT', 'RIGHT']) {
       const item = el('button', '', key); item.type = 'button';
       let pressed = false;
@@ -209,6 +226,11 @@ function renderBody(body, tile, tileElement) {
     const slot = textInput(controls, 'スロット (0-9)', '0');
     act('ステート保存', () => api.saveState(args({ slot: Number(slot.value) })));
     act('ステート読込', () => api.loadState(args({ slot: Number(slot.value) })));
+    act('ブラウザへステート保存', () => api.saveStateToBrowser(args({ slot: Number(slot.value) })));
+    act('ブラウザからステート復元', () => api.loadStateFromBrowser(args({ slot: Number(slot.value) })));
+    act('ブラウザへSave保存', () => api.saveSaveToBrowser(args()));
+    act('ブラウザからSave復元', () => api.loadSaveFromBrowser(args()));
+    act('ブラウザ内の一覧', () => api.listBrowserStates(args()));
     controls.append(button('ステートを書き出す', async () => {
       const data = await api.exportState(args({ slot: Number(slot.value) }));
       download(new Uint8Array(data), `instance-${tile.instanceId}-slot-${slot.value}.ml`);
@@ -235,6 +257,8 @@ function renderBody(body, tile, tileElement) {
       if (!blob) throw Error('Screenshot encoding failed');
       download(blob, `instance-${tile.instanceId}.png`, 'image/png');
     }));
+    act('フレーム基準を保存', () => api.captureFrame(args()));
+    act('フレーム差分', () => api.compareFrames(args()));
   } else if (tile.type === 'script') {
     const code = el('textarea'); code.rows = 5; code.placeholder = 'await mcp.call("status", { instanceId: 0 })';
     code.value = tile.settings.code || '';
@@ -259,18 +283,22 @@ function renderTile(tile) {
   node.dataset.id = tile.id; node.dataset.type = tile.type;
   node.querySelector('.tile-title').textContent = LABELS[tile.type];
   node.querySelector('.tile-id').textContent = `#${String(tile.instanceId).padStart(2, '0')}`;
+  if (tile.type === 'files') {
+    node.querySelector('.tile-id').textContent = 'DLC';
+    node.querySelector('.tile-target').hidden = true;
+  }
   const select = node.querySelector('.instance-select'); populateInstances(select, tile.instanceId);
   select.onchange = () => {
     tile.instanceId = Number(select.value); node.querySelector('.tile-id').textContent = `#${select.value.padStart(2, '0')}`;
-    save(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change'));
+    save(); updateScreenTargets(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change'));
   };
   const cpu = node.querySelector('.cpu-select'); cpu.value = tile.cpu;
   cpu.onchange = () => { tile.cpu = cpu.value; save(); };
   if (['screen', 'local-log', 'wifi-log', 'input', 'state', 'script', 'persistent-scripts'].includes(tile.type)) node.querySelector('.cpu-label').hidden = true;
   const min = node.querySelector('.tile-minimize');
-  min.onclick = () => { tile.minimized = !tile.minimized; node.classList.toggle('minimized', tile.minimized); min.setAttribute('aria-label', tile.minimized ? '展開' : '最小化'); save(); };
+  min.onclick = () => { tile.minimized = !tile.minimized; node.classList.toggle('minimized', tile.minimized); min.setAttribute('aria-label', tile.minimized ? '展開' : '最小化'); save(); updateScreenTargets(); };
   node.classList.toggle('minimized', tile.minimized);
-  node.querySelector('.tile-close').onclick = () => { layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
+  node.querySelector('.tile-close').onclick = () => { layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); updateScreenTargets(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
   node.style.zIndex = tile.z;
   if (layout.mode === 'free') place(node, tile);
   node.addEventListener('pointerdown', () => { tile.z = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1; node.style.zIndex = tile.z; save(); });
@@ -303,11 +331,12 @@ function renderLayout() {
   $('#workspace-empty').hidden = !!layout.tiles.length;
   for (const [mode, id] of [['grid', '#grid-mode'], ['free', '#free-mode']]) $(id).setAttribute('aria-pressed', String(layout.mode === mode));
   refreshSummary();
+  updateScreenTargets();
 }
 for (const type of TILE_TYPES) {
   const node = $('#palette-template').content.firstElementChild.cloneNode(true);
   node.querySelector('.palette-name').textContent = LABELS[type];
-  node.querySelector('.palette-icon').textContent = ({ screen: '▣', debugger: '⌁', memory: '▤', disassembly: '≡', registers: 'R', breakpoints: '◆', 'local-log': '↔', 'wifi-log': '◉', script: '⌘', 'persistent-scripts': '⟲', input: '＋', state: '◫' })[type];
+  node.querySelector('.palette-icon').textContent = ({ screen: '▣', debugger: '⌁', memory: '▤', disassembly: '≡', registers: 'R', breakpoints: '◆', 'local-log': '↔', 'wifi-log': '◉', script: '⌘', 'persistent-scripts': '⟲', input: '＋', state: '◫', files: '▥' })[type];
   node.onclick = () => addTile(type, 16 + layout.tiles.length * 24, 16 + layout.tiles.length * 24);
   node.ondragstart = event => { event.dataTransfer.setData('text/plain', type); event.dataTransfer.effectAllowed = 'copy'; };
   $('#palette-tools').append(node);

@@ -37,6 +37,7 @@ export function createWasmBackend() {
         worker.postMessage({ id, name, args });
       });
     },
+    setScreenTargets(instanceIds) { worker.postMessage({ type: 'screens', instanceIds }); },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }
   };
 }

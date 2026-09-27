@@ -5,6 +5,7 @@ import { validateWorkerRpc } from './sandbox/upstream/src/script-rpc-policy.js';
 import { assertSafeScriptSource } from './sandbox/upstream/src/script-source-policy.js';
 import { ResourceLimits } from './sandbox/upstream/src/resource-limits.js';
 import { normalizePersistentMcpParams } from './sandbox/upstream/src/worker-rpc-payload.js';
+import { sessionStore } from './session-store.js';
 const persistentMethods = new Set(['startPersistentScript', 'stopPersistentScript',
   'restartPersistentScript', 'listPersistentScripts', 'callPersistentScriptMcp', 'runScript']);
 const MAX_SCRIPTS = ResourceLimits.persistentScripts;
@@ -33,6 +34,7 @@ function checkedCode(code) {
 
 export function createScriptBackend(native) {
   const scripts = new Map();
+  const capturedFrames = new Map();
   let workerSources;
   const subscribers = new Set();
   let eventSerial = 0;
@@ -41,6 +43,72 @@ export function createScriptBackend(native) {
     return workerSources;
   };
   const key = (id, name) => `${id}:${name}`;
+  function waitOptions(args) {
+    const timeoutMs = args.timeoutMs ?? 30000;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw RangeError('timeoutMs must be 1..120000');
+    return { timeoutMs, signal: args.signal };
+  }
+  function waitFrames(args) {
+    if (!Number.isInteger(args.frames) || args.frames < 1 || args.frames > 1000000) throw RangeError('frames must be 1..1000000');
+    const { timeoutMs, signal } = waitOptions(args);
+    return new Promise((resolve, reject) => {
+      let start, latest = -1, finished = false;
+      const finish = (error, value) => {
+        if (finished) return;
+        finished = true; clearTimeout(timer); unsubscribe();
+        signal?.removeEventListener('abort', abort);
+        if (error) reject(error); else resolve(value);
+      };
+      const abort = () => finish(Error('Operation cancelled'));
+      const unsubscribe = native.subscribe(event => {
+        if (event.type !== 'frame' || event.instanceId !== args.instanceId) return;
+        latest = event.frame;
+        if (start === undefined) return;
+        if (latest < start) finish(Error('Instance frame counter changed during wait'));
+        else if (latest >= start + args.frames) finish(null, { instanceId: args.instanceId, frames: latest - start });
+      });
+      const timer = setTimeout(() => finish(Error('Frame wait timed out')), timeoutMs);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
+      void native.execute('status', { instanceId: args.instanceId }).then(status => {
+        if (!status.loaded) throw Error('Load a ROM first');
+        start = status.frames;
+        if (latest >= start + args.frames) finish(null, { instanceId: args.instanceId, frames: latest - start });
+      }).catch(error => finish(error));
+    });
+  }
+  function waitMemory(args) {
+    const { timeoutMs, signal } = waitOptions(args);
+    const pattern = new Uint8Array(args.pattern || []);
+    if (!pattern.length || pattern.length > 4096) throw RangeError('pattern length must be 1..4096');
+    const intervalMs = args.intervalMs ?? 50;
+    if (!Number.isInteger(intervalMs) || intervalMs < 16 || intervalMs > 1000) throw RangeError('intervalMs must be 16..1000');
+    return new Promise((resolve, reject) => {
+      let finished = false, pollTimer;
+      const finish = (error, value) => {
+        if (finished) return;
+        finished = true; clearTimeout(timeout); clearTimeout(pollTimer);
+        signal?.removeEventListener('abort', abort);
+        if (error) reject(error); else resolve(value);
+      };
+      const abort = () => finish(Error('Operation cancelled'));
+      const timeout = setTimeout(() => finish(Error('Memory wait timed out')), timeoutMs);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
+      const poll = async () => {
+        try {
+          const data = await native.execute('readMemory', {
+            instanceId: args.instanceId, cpu: args.cpu || 'ARM9', address: args.address, length: pattern.length
+          });
+          if (finished) return;
+          if (pattern.every((byte, index) => byte === data[index])) {
+            finish(null, { instanceId: args.instanceId, address: args.address, bytes: data });
+          } else pollTimer = setTimeout(poll, intervalMs);
+        } catch (error) { finish(error); }
+      };
+      void poll();
+    });
+  }
   function bindArgs(record, command, params) {
     if (!params || typeof params !== 'object' || Array.isArray(params)) throw Error('Worker RPC params must be an object');
     if (params.instanceId !== undefined && params.instanceId !== record.instanceId) throw Error('Cross-instance script RPC is not allowed');
@@ -49,16 +117,39 @@ export function createScriptBackend(native) {
   async function rpc(record, command, params) {
     if (command === 'register') {
       const kind = params.kind || params.type;
-      if (!['tick', 'start', 'stateLoad', 'stateSave'].includes(kind)) {
-        throw Error(`${kind} callback requires a native breakpoint event hook`);
+      if (['read', 'write', 'exec'].includes(kind)) {
+        const cpu = params.cpu || 'ARM9';
+        const bp = await native.execute('addBreakpoint', { instanceId: record.instanceId, cpu,
+          type: kind === 'exec' ? 'execute' : kind, address: params.address, length: params.length || 1 });
+        record.triggers.push({ ...params, kind, breakpointId: bp.id });
+        return { id: bp.id, ...params };
       }
+      if (!['tick', 'start', 'stateLoad', 'stateSave'].includes(kind)) throw Error(`Unsupported callback type ${kind}`);
       record.triggers.push({ ...params, kind });
       return { id: record.triggers.length, ...params };
     }
     if (command === 'callPersistentScriptMcp' || persistentMethods.has(command)) {
       throw Error('Nested script lifecycle calls are not permitted');
     }
-    return { ok: true, value: await native.execute(command, bindArgs(record, command, params)) };
+    const args = bindArgs(record, command, params);
+    if (command === 'memoryGetRegister') {
+      const registers = await native.execute('getRegisters', args);
+      return { ok: true, value: registers[params.register] };
+    }
+    if (command === 'memorySetRegister') {
+      return { ok: true, value: await native.execute('setRegister', args) };
+    }
+    const width = ({ memoryReadByte: 1, memoryReadWord: 2, memoryReadDword: 4,
+      memoryWriteByte: 1, memoryWriteWord: 2, memoryWriteDword: 4 })[command];
+    if (width) {
+      if (command.startsWith('memoryRead')) {
+        const bytes = await native.execute('readMemory', { ...args, length: width });
+        return { ok: true, value: bytes.reduce((value, byte, index) => value | byte << (index * 8), 0) >>> 0 };
+      }
+      const bytes = Array.from({ length: width }, (_, index) => (params.value >>> (index * 8)) & 255);
+      return { ok: true, value: await native.execute('writeMemory', { ...args, data: bytes }) };
+    }
+    return { ok: true, value: await native.execute(command, args) };
   }
   function summary(record) {
     return { instanceId: record.instanceId, name: record.name, running: record.running,
@@ -87,7 +178,7 @@ export function createScriptBackend(native) {
     const record = {
       instanceId, name, code, asyncMode: !!asyncMode, host, running: true,
       registered: false, started: false, triggers: [], mcps: [], output: [],
-      pending: new Set(), pendingMcp: new Map(), eventAcks: new Map(), startup, callSerial: 0,
+      pending: new Set(), pendingMcp: new Map(), eventAcks: new Map(), activeEvents: new Map(), startup, callSerial: 0,
       scriptInstanceId: crypto.randomUUID()
     };
     scripts.set(key(instanceId, name), record);
@@ -99,6 +190,9 @@ export function createScriptBackend(native) {
       for (const pending of record.eventAcks.values()) pending.reject(reason);
       record.eventAcks.clear();
       record.running = false; scripts.delete(key(instanceId, name)); host.dispose();
+      for (const trigger of record.triggers) if (trigger.breakpointId) {
+        void native.execute('removeBreakpoint', { instanceId, id: trigger.breakpointId }).catch(() => {});
+      }
     };
     host.worker.onerror = event => fatal(event.message || 'Supervisor crashed');
     host.worker.onmessageerror = () => fatal('Unreadable supervisor message');
@@ -119,6 +213,12 @@ export function createScriptBackend(native) {
             : validateWorkerRpc(message, record.pending);
           if (message.type === 'register') record.pending.add(message.id);
         } catch (error) { fatal(error); return; }
+        const active = Number(message.eventId) ? record.activeEvents.get(Number(message.eventId)) : null;
+        if (message.eventId && (!active || active.callbackId !== message.callbackId
+          || active.callbackToken !== message.callbackToken)) { fatal('Invalid callback event identity'); return; }
+        if (message.eventId && request.command === 'resume' && !active.released) {
+          fatal('Callback resume requires a matching event release'); return;
+        }
         void rpc(record, request.command, request.params).then(result => {
           if (record.running) host.worker.postMessage({ replyId: message.id, result });
         }, error => {
@@ -149,8 +249,19 @@ export function createScriptBackend(native) {
       else if (message.type === 'eventAck') {
         record.eventAcks.get(message.queueEventId)?.resolve({ instanceId, name, eventId: message.queueEventId });
       }
-      else if (message.type === 'eventDone' || message.type === 'sourceIdentity') { /* native callbacks registered separately */ }
-      else if (message.type === 'eventRelease') fatal('Callback release requires a native breakpoint trap');
+      else if (message.type === 'eventDone') {
+        const active = record.activeEvents.get(message.eventId);
+        if (active && active.callbackId === message.callbackId && active.callbackToken === message.callbackToken) {
+          active.done = true;
+        }
+      }
+      else if (message.type === 'eventRelease') {
+        const active = record.activeEvents.get(message.eventId);
+        if (!active || active.callbackId !== message.callbackId || active.callbackToken !== message.callbackToken
+          || message.mode !== 'resume') { fatal('Invalid breakpoint callback release'); return; }
+        active.released = true;
+      }
+      else if (message.type === 'sourceIdentity') { /* source identity is checked by the supervisor */ }
       else fatal(`Unknown supervisor message: ${message.type}`);
     };
     try { return await Promise.race([startup.promise, wait(timeoutMs, 'Script startup timed out')]); }
@@ -175,6 +286,9 @@ export function createScriptBackend(native) {
       record.pendingMcp.clear(); record.host.dispose(); scripts.delete(key(instanceId, name));
       for (const pending of record.eventAcks.values()) pending.reject(Error('Script stopped'));
       record.eventAcks.clear();
+      record.activeEvents.clear();
+      await Promise.all(record.triggers.filter(trigger => trigger.breakpointId).map(trigger =>
+        native.execute('removeBreakpoint', { instanceId, id: trigger.breakpointId }).catch(() => {})));
     }
     return summary(record);
   }
@@ -221,10 +335,76 @@ export function createScriptBackend(native) {
         void dispatch(record, 'tick', { instanceId: event.instanceId });
       }
     }
+    if (event.type === 'breakpoint') {
+      for (const record of scripts.values()) {
+        if (record.instanceId !== event.instanceId || !record.running || !record.registered) continue;
+        for (const trigger of record.triggers) {
+          if (trigger.breakpointId !== event.breakpointId) continue;
+          const eventId = ++eventSerial, callbackToken = crypto.randomUUID();
+          record.activeEvents.set(eventId, { callbackId: trigger.callbackId, callbackToken, released: false });
+          record.host.worker.postMessage({ type: 'event',
+            event: trigger.kind, payload: event, eventId, callbackId: trigger.callbackId,
+            triggerId: trigger.breakpointId, callbackToken });
+        }
+      }
+    }
     for (const listener of subscribers) listener(event);
   });
   return {
     async execute(name, args = {}) {
+      if (name === 'waitFrames') return waitFrames(args);
+      if (name === 'waitMemory') return waitMemory(args);
+      if (name === 'captureFrame') {
+        const frame = await native.execute('screenshot', args);
+        capturedFrames.set(args.instanceId, frame);
+        return { instanceId: args.instanceId, width: frame.width, height: frame.height, captured: true };
+      }
+      if (name === 'compareFrames') {
+        const before = capturedFrames.get(args.instanceId);
+        if (!before) throw Error('Capture a reference frame first');
+        const after = await native.execute('screenshot', args);
+        const threshold = args.threshold ?? 0;
+        if (!Number.isInteger(threshold) || threshold < 0 || threshold > 255) throw RangeError('threshold must be 0..255');
+        const changed = {};
+        for (const screen of ['top', 'bottom']) {
+          let pixels = 0;
+          const original = before[screen], current = after[screen];
+          for (let n = 0; n < current.length; n += 4) {
+            if (Math.abs(original[n] - current[n]) > threshold
+              || Math.abs(original[n + 1] - current[n + 1]) > threshold
+              || Math.abs(original[n + 2] - current[n + 2]) > threshold) pixels++;
+          }
+          changed[screen] = pixels;
+        }
+        return { instanceId: args.instanceId, changedPixels: changed, totalPixels: after.width * after.height * 2 };
+      }
+      if (name === 'listBrowserStates') return sessionStore.list(args);
+      if (name === 'saveStateToBrowser') {
+        await native.execute('saveState', args);
+        const bytes = await native.execute('exportState', args);
+        const stored = await sessionStore.put({ ...args, slot: args.slot ?? 0, data: bytes });
+        await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
+          .map(s => dispatch(s, 'stateSave', { instanceId: args.instanceId, slot: args.slot ?? 0 }, true)));
+        return stored;
+      }
+      if (name === 'loadStateFromBrowser') {
+        const slot = args.slot ?? 0;
+        const blob = await sessionStore.get({ instanceId: args.instanceId, slot });
+        if (!blob) throw Error('No browser savestate in this slot');
+        const result = await native.execute('loadState', { ...args, slot, bytes: await blob.arrayBuffer() });
+        await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
+          .map(s => dispatch(s, 'stateLoad', { instanceId: args.instanceId, slot }, true)));
+        return result;
+      }
+      if (name === 'saveSaveToBrowser') {
+        const bytes = await native.execute('exportSave', args);
+        return sessionStore.put({ instanceId: args.instanceId, slot: 'save', data: bytes });
+      }
+      if (name === 'loadSaveFromBrowser') {
+        const blob = await sessionStore.get({ instanceId: args.instanceId, slot: 'save' });
+        if (!blob) throw Error('No browser save for this instance');
+        return native.execute('importSave', { ...args, bytes: await blob.arrayBuffer() });
+      }
       if (!persistentMethods.has(name)) {
         if (name === 'destroyInstance' || name === 'loadRom' || name === 'loadRomMany') {
           const targets = name === 'loadRomMany' ? args.instanceIds : [args.instanceId];
@@ -233,6 +413,8 @@ export function createScriptBackend(native) {
           }
         }
         const result = await native.execute(name, args);
+        if (name === 'destroyInstance' || name === 'loadRom' || name === 'reset') capturedFrames.delete(args.instanceId);
+        if (name === 'loadRomMany') for (const id of args.instanceIds) capturedFrames.delete(id);
         if (name === 'saveState' || name === 'loadState') {
           const type = name === 'saveState' ? 'stateSave' : 'stateLoad';
           await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
@@ -252,6 +434,7 @@ export function createScriptBackend(native) {
       if (name === 'callPersistentScriptMcp') return callMcp(args);
       if (name === 'runScript') return runOnce(args);
     },
+    setScreenTargets(instanceIds) { native.setScreenTargets(instanceIds); },
     subscribe(listener) { subscribers.add(listener); return () => subscribers.delete(listener); },
     close() { unsubscribe(); }
   };

@@ -1,12 +1,13 @@
 export const TILE_TYPES = Object.freeze([
   'screen', 'debugger', 'memory', 'disassembly', 'registers', 'breakpoints',
-  'local-log', 'wifi-log', 'script', 'persistent-scripts', 'input', 'state'
+  'local-log', 'wifi-log', 'script', 'persistent-scripts', 'input', 'state', 'files'
 ]);
 export const LABELS = Object.freeze({
   screen: 'Emulator Screen', debugger: 'Debugger', memory: 'Memory Viewer',
   disassembly: 'Disassembler', registers: 'Registers', breakpoints: 'Breakpoints',
   'local-log': 'Local Communication', 'wifi-log': 'Wi-Fi Logger', script: 'Script Console',
-  'persistent-scripts': 'Persistent Scripts', input: 'Input Controller', state: 'State Manager'
+  'persistent-scripts': 'Persistent Scripts', input: 'Input Controller', state: 'State Manager',
+  files: 'File Explorer'
 });
 const KEY = 'melonds.workspace.v1';
 const defaultTiles = [
@@ -19,8 +20,8 @@ export function makeTile(type, options = {}) {
   if (!TILE_TYPES.includes(type)) throw new RangeError('Unknown tile type');
   return {
     id: globalThis.crypto?.randomUUID?.() || `tile-${Date.now()}-${Math.random()}`,
-    type, x: 0, y: 0, width: type === 'screen' ? 316 : 360,
-    height: type === 'screen' ? 474 : 300, z: 1, instanceId: 0,
+    type, x: 0, y: 0, width: type === 'screen' ? 316 : type === 'files' ? 520 : 360,
+    height: type === 'screen' ? 474 : type === 'files' ? 440 : 300, z: 1, instanceId: 0,
     cpu: 'ARM9', minimized: false, settings: {}, ...options
   };
 }
