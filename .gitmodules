@@ -1,0 +1,6 @@
+[submodule "melonDS_w"]
+	path = melonDS_w
+	url = git@github.com:DaisukeDaisukeForks/melonDS_w.git
+[submodule "interface-design"]
+	path = interface-design
+	url = git@github.com:Dammyjay93/interface-design.git
