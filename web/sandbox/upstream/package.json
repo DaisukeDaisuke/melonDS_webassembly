@@ -1,0 +1,23 @@
+{
+  "name": "desmume-web-debugger",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:js": "node scripts/build-js.mjs",
+    "watch:js": "node scripts/watch-js.mjs",
+    "check:js": "node scripts/check-js.mjs",
+    "check:dependency-bundles": "node scripts/check-dependency-bundles.mjs",
+    "minify:wasm": "terser public/desmume.js -o public/desmume.js --compress --mangle",
+    "test": "node --test tests/*.test.mjs",
+    "build:notices": "node scripts/build-third-party-notices.mjs",
+    "check:licenses": "node scripts/check-licenses.mjs"
+  },
+  "dependencies": {
+    "acorn": "8.17.0",
+    "ssim.js": "3.5.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.6",
+    "terser": "5.43.1"
+  }
+}

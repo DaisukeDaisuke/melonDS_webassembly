@@ -1,0 +1,32 @@
+name: Build melonDS WebAssembly
+on:
+  push:
+    paths: ['melonDS_w', 'web/**', 'webassembly/**', '.github/workflows/build-web.yml']
+  pull_request:
+  workflow_dispatch:
+jobs:
+  wasm:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Emscripten
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emscripten
+      - name: Build using the same script as Codespace
+        run: bash webassembly/build.sh
+      - name: Build original isolated script workers
+        run: |
+          cd web/sandbox/upstream
+          npm ci --ignore-scripts
+          cd ../../..
+          node web/scripts/build-workers.mjs
+      - name: Check frontend
+        run: node --test web/tests/*.test.js
+      - name: Upload WebAssembly and UI
+        uses: actions/upload-artifact@v4
+        with:
+          name: melonds-workbench
+          path: web/
