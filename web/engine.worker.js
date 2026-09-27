@@ -39,7 +39,7 @@ function execute(name, args) {
     for (const id of args.instanceIds) requireInstance(id);
     return withBytes(rom, pointer => args.instanceIds.map(id => {
       success(call('web_load_rom', id, pointer, rom.length), name);
-      romLoaded.add(id); paused.delete(id); return { instanceId: id };
+      romLoaded.add(id); paused.delete(id); freezes[id].clear(); return { instanceId: id };
     }));
   }
   const { instanceId: id } = args;
@@ -62,7 +62,7 @@ function execute(name, args) {
     const rom = new Uint8Array(args.bytes);
     return withBytes(rom, pointer => {
       success(call('web_load_rom', id, pointer, rom.length), name);
-      romLoaded.add(id); paused.delete(id); return { instanceId: id };
+      romLoaded.add(id); paused.delete(id); freezes[id].clear(); return { instanceId: id };
     });
   }
   if (name === 'reset' || name === 'pause' || name === 'resume') {

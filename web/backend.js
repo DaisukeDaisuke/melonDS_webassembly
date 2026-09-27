@@ -6,6 +6,7 @@ export function createWasmBackend() {
   const pending = new Map();
   let serial = 0;
   let settled = false;
+  let fatalError = null;
   let readyResolve, readyReject;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   worker.onmessage = ({ data }) => {
@@ -19,6 +20,7 @@ export function createWasmBackend() {
   };
   const fail = error => {
     const reason = new Error(error?.message || 'Wasm worker failed to initialize');
+    fatalError = reason;
     if (!settled) { settled = true; readyReject(reason); }
     for (const entry of pending.values()) entry.reject(reason);
     pending.clear();
@@ -28,6 +30,7 @@ export function createWasmBackend() {
   return {
     async execute(name, args = {}) {
       await ready;
+      if (fatalError) throw fatalError;
       const id = ++serial;
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });

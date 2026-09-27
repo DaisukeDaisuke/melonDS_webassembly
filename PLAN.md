@@ -17,7 +17,8 @@
 
 - [x] ソース構造・参照実装・ビルド環境を調査。詳細は `WORK_DETAILS.md`。
 - [x] UI/API基盤、Wasm呼び出しWorker、ブラウザ内の原本Workerソース管理、実データのLocalMP/Wi-Fi記録経路を追加。
-- [x] Web用PlatformとWasmエントリーポイントを追加しCodespaceでリンクまで確認。
+- [x] Web用PlatformとWasmエントリーポイントを追加し、**逐次実行版**をCodespaceでリンクまで確認。
+- [ ] pthreadでの16台並列化は変更途中。`HANDOFF.md` の最優先項目を整合させ、ビルド確認する。
 - [ ] ROM実行をブラウザで確認し、16台の同時動作とLocalMPの実通信を確認。
 - [ ] 原本Worker群のブラウザ起動・callback/ブレークポイント連携を検証し機能等価にする。
 - [ ] DeSmuME相当のステップ・ブレークポイント・検索・フリーズ・入力記録等をコアに実装。

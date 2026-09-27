@@ -6,6 +6,11 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 #include <emscripten/emscripten.h>
 
@@ -15,15 +20,64 @@ struct Instance {
     std::unique_ptr<melonDS::NDS> nds;
     std::vector<melonDS::u8> save;
     std::array<std::vector<melonDS::u8>, 10> states;
-    bool paused = true;
+    std::mutex coreMutex;
+    std::mutex wakeMutex;
+    std::condition_variable wake;
+    std::thread runner;
+    std::atomic<bool> alive {true};
+    std::atomic<bool> paused {true};
+    std::atomic<bool> romLoaded {false};
+    std::atomic<unsigned> completedFrames {0};
 };
 std::array<std::unique_ptr<Instance>, 16> instances;
 melonDS::LocalMP localMP;
 Instance* get(int id) { return id >= 0 && id < 16 ? instances[id].get() : nullptr; }
+void runFrames(Instance* inst) {
+    using clock = std::chrono::steady_clock;
+    auto next = clock::now();
+    while (inst->alive.load()) {
+        if (inst->paused.load() || !inst->romLoaded.load()) {
+            std::unique_lock<std::mutex> waitLock(inst->wakeMutex);
+            inst->wake.wait(waitLock, [inst] { return !inst->alive.load() ||
+                (!inst->paused.load() && inst->romLoaded.load()); });
+            next = clock::now();
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> guard(inst->coreMutex);
+            if (inst->alive.load() && !inst->paused.load() && inst->nds->IsRunning()) {
+                inst->nds->RunFrame();
+                inst->completedFrames = inst->nds->NumFrames;
+            }
+            else if (!inst->nds->IsRunning()) inst->paused = true;
+        }
+        next += std::chrono::microseconds(16742);
+        if (next < clock::now()) next = clock::now();
+        std::this_thread::sleep_until(next);
+    }
+}
+int loadStateLocked(Instance* inst, int slot) {
+    if (slot < 0 || slot >= 10 || inst->states[slot].empty()) return -1;
+    melonDS::Savestate rollback;
+    if (!inst->nds->DoSavestate(&rollback) || rollback.Error) return -2;
+    rollback.Finish();
+    if (rollback.Error) return -2;
+    auto& bytes = inst->states[slot];
+    melonDS::Savestate file(bytes.data(), bytes.size(), false);
+    if (inst->nds->DoSavestate(&file) && !file.Error) {
+        inst->completedFrames = inst->nds->NumFrames;
+        return 0;
+    }
+    melonDS::Savestate restore(rollback.Buffer(), rollback.Length(), false);
+    inst->nds->DoSavestate(&restore);
+    inst->completedFrames = inst->nds->NumFrames;
+    return -2;
+}
 }
 
-// This frontend uses a single serialized Wasm worker. Every exported call
-// completes the native operation before returning to its RPC caller.
+// The dispatcher Worker owns all exported calls. Each NDS has a dedicated
+// pthread running inside the SAME shared Wasm memory as the real LocalMP FIFO.
+// Per-instance core locks make RPC completion a safe observation boundary.
 extern "C" {
 EMSCRIPTEN_KEEPALIVE int web_create(int id) {
     if (id < 0 || id >= 16 || instances[id]) return -1;
@@ -33,11 +87,16 @@ EMSCRIPTEN_KEEPALIVE int web_create(int id) {
     args.JIT = std::nullopt;
     instance->nds = std::make_unique<melonDS::NDS>(std::move(args), instance.get());
     instances[id] = std::move(instance);
+    instances[id]->runner = std::thread(runFrames, instances[id].get());
     return id;
 }
 EMSCRIPTEN_KEEPALIVE int web_destroy(int id) {
     auto* inst = get(id);
     if (!inst) return -1;
+    inst->paused = true;
+    inst->alive = false;
+    inst->wake.notify_all();
+    if (inst->runner.joinable()) inst->runner.join();
     inst->nds->Stop();
     instances[id].reset();
     return 0;
@@ -45,54 +104,89 @@ EMSCRIPTEN_KEEPALIVE int web_destroy(int id) {
 EMSCRIPTEN_KEEPALIVE int web_load_rom(int id, const melonDS::u8* data, int length) {
     auto* inst = get(id);
     if (!inst || !data || length < 0x200 || length > 128 * 1024 * 1024) return -1;
+    const bool wasPaused = inst->paused.exchange(true);
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     auto cart = melonDS::NDSCart::ParseROM(data, length, inst);
-    if (!cart) return -2;
+    if (!cart) { inst->paused = wasPaused; if (!wasPaused) inst->wake.notify_one(); return -2; }
     inst->nds->Stop();
     inst->nds->SetNDSCart(std::move(cart));
+    inst->save.clear();
+    for (auto& state : inst->states) state.clear();
     inst->nds->Reset();
     inst->nds->SetupDirectBoot("web.nds");
     inst->nds->Start();
+    inst->completedFrames = inst->nds->NumFrames;
+    inst->romLoaded = true;
     inst->paused = false;
+    inst->wake.notify_one();
     return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_reset(int id) {
     auto* inst = get(id); if (!inst) return -1;
-    const bool paused = inst->paused;
+    const bool paused = inst->paused.exchange(true);
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     inst->nds->Stop(); inst->nds->Reset();
     if (inst->nds->CartInserted()) inst->nds->SetupDirectBoot("web.nds");
     inst->nds->Start(); inst->paused = paused;
+    inst->completedFrames = inst->nds->NumFrames;
+    if (!paused) inst->wake.notify_one();
     return 0;
 }
-EMSCRIPTEN_KEEPALIVE int web_pause(int id) { auto* inst = get(id); if (!inst) return -1; inst->paused = true; return 0; }
-EMSCRIPTEN_KEEPALIVE int web_resume(int id) { auto* inst = get(id); if (!inst) return -1; inst->paused = false; return 0; }
+EMSCRIPTEN_KEEPALIVE int web_pause(int id) {
+    auto* inst = get(id); if (!inst) return -1;
+    inst->paused = true;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_resume(int id) {
+    auto* inst = get(id); if (!inst || !inst->romLoaded.load()) return -1;
+    inst->paused = false; inst->wake.notify_one(); return 0;
+}
 EMSCRIPTEN_KEEPALIVE int web_frame(int id) {
-    auto* inst = get(id); if (!inst || !inst->nds->IsRunning()) return -1;
-    if (!inst->paused) inst->nds->RunFrame();
+    auto* inst = get(id); if (!inst) return -1;
+    // Explicit frame step only while paused; normal frames run on its pthread.
+    if (!inst->paused.load()) return -2;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (!inst->nds->IsRunning()) return -1;
+    inst->nds->RunFrame();
+    inst->completedFrames = inst->nds->NumFrames;
     return static_cast<int>(inst->nds->NumFrames);
 }
 EMSCRIPTEN_KEEPALIVE int web_frame_number(int id) {
-    auto* inst = get(id); return inst ? static_cast<int>(inst->nds->NumFrames) : -1;
+    auto* inst = get(id); if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return static_cast<int>(inst->nds->NumFrames);
+}
+EMSCRIPTEN_KEEPALIVE int web_peek_frame_number(int id) {
+    auto* inst = get(id);
+    return inst ? static_cast<int>(inst->completedFrames.load()) : -1;
 }
 EMSCRIPTEN_KEEPALIVE int web_register(int id, int cpu, int reg) {
     auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9) || reg < 0 || reg > 16) return 0;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     auto* arm = cpu == 9 ? static_cast<melonDS::ARM*>(inst->nds->ARM9) : inst->nds->ARM7;
-    return reg == 16 ? arm->CPSR : arm->R[reg];
+    if (reg == 16) return arm->CPSR;
+    return reg == 15 ? arm->R[15] - ((arm->CPSR & 0x20) ? 2 : 4) : arm->R[reg];
 }
 EMSCRIPTEN_KEEPALIVE int web_set_register(int id, int cpu, int reg, unsigned value) {
-    auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9) || reg < 0 || reg > 16 || !inst->paused) return -1;
+    auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9) || reg < 0 || reg > 16 || !inst->paused.load()) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     auto* arm = cpu == 9 ? static_cast<melonDS::ARM*>(inst->nds->ARM9) : inst->nds->ARM7;
     if (reg == 16) arm->CPSR = value;
+    else if (reg == 15) arm->JumpTo(value);
     else arm->R[reg] = value;
     return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_read_memory(int id, int cpu, unsigned address, melonDS::u8* out, int length) {
     auto* inst = get(id); if (!inst || !out || (cpu != 7 && cpu != 9) || length < 0 || length > 4096) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     for (int n = 0; n < length; n++) out[n] = cpu == 9 ? inst->nds->ARM9Read8(address + n) : inst->nds->ARM7Read8(address + n);
     return length;
 }
 EMSCRIPTEN_KEEPALIVE int web_write_memory(int id, int cpu, unsigned address, const melonDS::u8* in, int length) {
-    // Calls are serialized on the Wasm Worker, including writes between frames.
+    // The per-instance lock serializes writes with its frame pthread.
     auto* inst = get(id); if (!inst || !in || (cpu != 7 && cpu != 9) || length < 0 || length > 4096) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     for (int n = 0; n < length; n++) {
         if (cpu == 9) inst->nds->ARM9Write8(address + n, in[n]);
         else inst->nds->ARM7Write8(address + n, in[n]);
@@ -101,10 +195,13 @@ EMSCRIPTEN_KEEPALIVE int web_write_memory(int id, int cpu, unsigned address, con
 }
 EMSCRIPTEN_KEEPALIVE int web_key_mask(int id, unsigned mask) {
     auto* inst = get(id); if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     inst->nds->SetKeyMask(mask); return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_save_state(int id, int slot) {
-    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10 || !inst->nds->CartInserted()) return -1;
+    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (!inst->nds->CartInserted()) return -1;
     melonDS::Savestate file;
     if (!inst->nds->DoSavestate(&file) || file.Error) return -2;
     file.Finish();
@@ -114,23 +211,18 @@ EMSCRIPTEN_KEEPALIVE int web_save_state(int id, int slot) {
     return static_cast<int>(inst->states[slot].size());
 }
 EMSCRIPTEN_KEEPALIVE int web_load_state(int id, int slot) {
-    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10 || inst->states[slot].empty()) return -1;
-    melonDS::Savestate rollback;
-    if (!inst->nds->DoSavestate(&rollback) || rollback.Error) return -2;
-    rollback.Finish();
-    if (rollback.Error) return -2;
-    auto& bytes = inst->states[slot];
-    melonDS::Savestate file(bytes.data(), bytes.size(), false);
-    if (inst->nds->DoSavestate(&file) && !file.Error) return 0;
-    melonDS::Savestate restore(rollback.Buffer(), rollback.Length(), false);
-    inst->nds->DoSavestate(&restore);
-    return -2;
+    auto* inst = get(id); if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return loadStateLocked(inst, slot);
 }
 EMSCRIPTEN_KEEPALIVE int web_state_size(int id, int slot) {
-    auto* inst = get(id); return inst && slot >= 0 && slot < 10 ? static_cast<int>(inst->states[slot].size()) : -1;
+    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return static_cast<int>(inst->states[slot].size());
 }
 EMSCRIPTEN_KEEPALIVE int web_state_export(int id, int slot, melonDS::u8* dest, int capacity) {
     auto* inst = get(id); if (!inst || slot < 0 || slot >= 10 || !dest || capacity < 0) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     const auto& bytes = inst->states[slot];
     if (capacity < static_cast<int>(bytes.size())) return -2;
     std::memcpy(dest, bytes.data(), bytes.size());
@@ -139,36 +231,45 @@ EMSCRIPTEN_KEEPALIVE int web_state_export(int id, int slot, melonDS::u8* dest, i
 EMSCRIPTEN_KEEPALIVE int web_state_import(int id, int slot, const melonDS::u8* data, int length) {
     auto* inst = get(id);
     if (!inst || slot < 0 || slot >= 10 || !data || length < 8 || length > 64 * 1024 * 1024) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     auto previous = std::move(inst->states[slot]);
     inst->states[slot].assign(data, data + length);
-    const int result = web_load_state(id, slot);
+    const int result = loadStateLocked(inst, slot);
     if (result < 0) inst->states[slot] = std::move(previous);
     return result;
 }
 EMSCRIPTEN_KEEPALIVE int web_save_size(int id) {
-    auto* inst = get(id); return inst ? static_cast<int>(inst->nds->GetNDSSaveLength()) : -1;
+    auto* inst = get(id); if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return static_cast<int>(inst->nds->GetNDSSaveLength());
 }
 EMSCRIPTEN_KEEPALIVE int web_save_export(int id, melonDS::u8* dest, int capacity) {
     auto* inst = get(id); if (!inst || !dest || capacity < 0) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     const auto* data = inst->nds->GetNDSSave();
-    int size = web_save_size(id);
+    int size = inst->nds->GetNDSSaveLength();
     if (!data || capacity < size) return -2;
     std::memcpy(dest, data, size); return size;
 }
 EMSCRIPTEN_KEEPALIVE int web_save_import(int id, const melonDS::u8* data, int length) {
     auto* inst = get(id);
-    if (!inst || !data || length < 0 || length > 16 * 1024 * 1024 || !inst->nds->CartInserted()) return -1;
+    if (!inst || !data || length < 0 || length > 16 * 1024 * 1024) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (!inst->nds->CartInserted()) return -1;
     inst->nds->SetNDSSave(data, length);
     inst->save.assign(data, data + length);
     return 0;
 }
-EMSCRIPTEN_KEEPALIVE int web_framebuffers(int id, unsigned* addresses) {
-    auto* inst = get(id); if (!inst || !addresses) return -1;
+EMSCRIPTEN_KEEPALIVE int web_copy_frame(int id, melonDS::u8* destination, int capacity) {
+    constexpr int kOneScreenBytes = 256 * 192 * 4;
+    auto* inst = get(id); if (!inst || !destination || capacity < kOneScreenBytes * 2) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
     void* top = nullptr; void* bottom = nullptr;
     if (!inst->nds->GPU.GetFramebuffers(&top, &bottom)) return -2;
-    addresses[0] = reinterpret_cast<uintptr_t>(top);
-    addresses[1] = reinterpret_cast<uintptr_t>(bottom);
-    return 0;
+    if (!top || !bottom) return -2;
+    memcpy(destination, top, kOneScreenBytes);
+    memcpy(destination + kOneScreenBytes, bottom, kOneScreenBytes);
+    return kOneScreenBytes * 2;
 }
 static std::array<melonDS::LocalMP::PacketLogEntry, melonDS::LocalMP::kLogCapacity> logs;
 static unsigned logCount;

@@ -101,7 +101,7 @@ function renderLog(body, tile) {
   controls.append(button('消去', () => { state.logs[tile.type] = []; update(); }));
   const table = el('table', 'packet-table');
   const head = el('thead'); const header = el('tr');
-  for (const label of ['時刻', '送信', '受信', '種別', '長さ', 'raw payload']) header.append(el('th', '', label));
+  for (const label of ['時刻', '方向', '送信/SenderID', '受信', '種別', '長さ', 'raw payload']) header.append(el('th', '', label));
   head.append(header); table.append(head); const tbody = el('tbody'); table.append(tbody); body.append(table);
   const empty = el('p', 'muted', '受信データはまだありません。'); body.append(empty);
   function update() {
@@ -112,8 +112,10 @@ function renderLog(body, tile) {
     empty.hidden = !!entries.length;
     for (const packet of entries) {
       const tr = el('tr');
-      for (const value of [packet.timestamp, packet.instanceId, packet.destination ?? '*',
-        packet.packetType || packet.direction || 'PACKET', packet.length ?? packet.payload?.length ?? 0,
+      const sender = tile.type === 'wifi-log' && packet.direction === 'RX' ? 'NET' : packet.senderId ?? packet.instanceId;
+      const receiver = tile.type === 'wifi-log' ? (packet.direction === 'RX' ? packet.instanceId : 'NET') : packet.destination ?? '*';
+      for (const value of [packet.timestamp, packet.direction || 'TX', sender, receiver,
+        packet.packetType || 'PACKET', packet.length ?? packet.payload?.length ?? 0,
         fmt(packet.payload ?? packet.data ?? '')]) tr.append(el('td', '', String(value)));
       tbody.append(tr);
     }

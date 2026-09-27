@@ -226,6 +226,12 @@ export function createScriptBackend(native) {
   return {
     async execute(name, args = {}) {
       if (!persistentMethods.has(name)) {
+        if (name === 'destroyInstance' || name === 'loadRom' || name === 'loadRomMany') {
+          const targets = name === 'loadRomMany' ? args.instanceIds : [args.instanceId];
+          for (const record of [...scripts.values()]) {
+            if (targets.includes(record.instanceId)) await stop({ instanceId: record.instanceId, name: record.name });
+          }
+        }
         const result = await native.execute(name, args);
         if (name === 'saveState' || name === 'loadState') {
           const type = name === 'saveState' ? 'stateSave' : 'stateLoad';

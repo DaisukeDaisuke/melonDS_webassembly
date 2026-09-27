@@ -1,5 +1,18 @@
 # 次チャットへの引き継ぎ（melonDS WebAssembly Web Debugger）
 
+## 最優先: 直近の未完了変更を先に整合させる
+
+ユーザーの指示により、**並列化の途中で作業を停止した**。直近の `webassembly/port.cpp` は `NDS` ごとにpthreadを起こし、共有Wasmメモリ内のLocalMPを実際に共有する方向へ変更したが、**この変更後のビルドは実行していない**。ROM動作も検証していない。現状を完成版として使わないこと。
+
+とくに以下は現在**不整合**で、次の担当者はまずここから修正すること:
+
+1. `webassembly/port.cpp` で `web_framebuffers` を削除し `web_copy_frame(instanceId, destination, capacity)` にしたが、`webassembly/CMakeLists.txt` はまだ `_web_framebuffers` をexportし、`web/engine.worker.js` の `frame()` と `screenshot` も古い `_web_framebuffers` を呼ぶ。これを `_web_copy_frame` で安全に2画面をコピーする方式へ統一する。pthreadがGPUを更新中に生ポインタを読む設計へ戻してはいけない。
+2. `web/engine.worker.js` の60fps timerはまだ `_web_frame` を順次呼ぶ。pthreadを起こした後はtimerが各機を進めてはいけない。`port.cpp` に追加した `_web_peek_frame_number` をポーリングし、更新時だけフレーム/イベントを発行する方式へ変更する。画面タイルが不要なinstanceまで毎回400KB転送せず、表示対象を絞る。一方、画面タイルがなくてもpersistent scriptのtickイベントは必要。
+3. CMakeの `PTHREAD_POOL_SIZE` は現状 `0`。インスタンスごとのpthreadとGPU側のthreadが使用可能な数へ調整し、Emscriptenで **ビルドのみ**行う（現在ユーザーがテスト・ROM確認を禁止している）。`port.cpp` の `std::thread` 作成・終了、`mutex`、pauseの完了保証、16インスタンスのリソースに注意する。
+4. `webassembly/port.cpp` のrunner変更を見直すこと。既存コアの `NDS::RunFrame` が参照するGPU/SPU/LocalMPは別threadから呼ばれる。セーブコールバック、Stateの復元・frame番号更新、Stop/Resetの境界、Workerからのメモリ読書きに同じinstanceのlockが適用されるようにする。
+
+この状態で古いビルド済み `web/dist/melonds.*` は**直近のpthread化を含まない**。先のビルド成功（exit 0）は単一Workerで逐次フレームを回す版についてのみ。ユーザーがROM検証を次チャットに任せるまで、このチャットでは行っていない。
+
 ## 今回の作業と条件
 
 - 原本仕様 `sizisilyo.txt` を最優先し、UIは `interface-design/.claude/skills/interface-design/SKILL.md` を参照する。見た目のタイルだけで19完成条件を達成したと判断しない。
@@ -11,9 +24,9 @@
 | 場所 | 内容 |
 |---|---|
 | `webassembly/build.sh` / `CMakeLists.txt` | Emscripten Wasmビルド。Qt・JIT・OpenGL無効、現forkのコンパイル制約でGDB stub有効、core/teakraとも `-pthread`。成果物は `web/dist/melonds.js`, `.wasm`, `.worker.js`。 |
-| `webassembly/port.cpp` / `platform.cpp` / `virtual-net.h` | 16個のNDS、共有LocalMP、エミュレーション呼び出し、画面、ROM/Save/State/メモリ/CPU、Platform userdata、NetDriver raw Ethernetキュー。 |
+| `webassembly/port.cpp` / `platform.cpp` / `virtual-net.h` | 16個のNDS、共有LocalMP、エミュレーション呼び出し、画面、ROM/Save/State/メモリ/CPU、Platform userdata、NetDriver raw Ethernetキュー。**直近のpthread変更とJS側は未整合（上記参照）**。 |
 | `melonDS_w/src/net/LocalMP.{h,cpp}` | LocalMPの送受信を固定長ringへコピー。通信FIFOは変更せず、ログ超過は観測記録だけ破棄する。 |
-| `web/engine.worker.js` / `backend.js` / `api.js` | Wasm Worker分離、完了返信付きRPC、明示的instanceId、同一instance操作の順序保証。未実装の命令step・breakpoint等はエラーで返す。 |
+| `web/engine.worker.js` / `backend.js` / `api.js` | Wasm Worker分離、完了返信付きRPC、明示的instanceId、同一instance操作の順序保証、主RAM限定の検索とフレーム境界でのフリーズ、キュー中操作の取消・状態取得。未実装の命令step・breakpoint等はエラーで返す。 |
 | `web/index.html` / `app.js` / `style.css` / `layout.js` | 画面とデバッグ系の独立タイル、Gridと自由配置、リサイズ・Drag & Drop・localStorage復元。 |
 | `web/sandbox/upstream/` / `web/scripts/build-workers.mjs` / `web/script-service.js` | コピーした原本のparser/isolated eval/persistent supervisorとsandboxをハッシュ検証付きでバンドル。melonDS instanceへのRPCをアダプト。現時点でnativeブレークポイントcallbackは未接続。 |
 | `web/virtual-network.js` | JSサービスがraw Ethernetを処理し、応答を`Platform::Net_RecvPacket`へ注入する基礎。DNS/TCP/DWCの実サービスはまだ未実装。 |
@@ -23,14 +36,14 @@
 
 Codespace `organic-fishstick-wrjpjx79qjwc5qgr` にapt版 Emscripten 3.1.6 が導入済み。ユーザー指示のためSSH内で同期ビルドしない。編集済みディレクトリを転送して `gh codespace ssh -c organic-fishstick-wrjpjx79qjwc5qgr "nohup bash /workspaces/melonDS_webassembly/webassembly/build-async.sh > /dev/null 2>&1 < /dev/null &"`。`webassembly/build.exit` の内容を確認し、失敗した場合だけ `build.log` の末尾を読む。転送例: `gh codespace cp -r webassembly remote:/workspaces/melonDS_webassembly/ -c organic-fishstick-wrjpjx79qjwc5qgr -e`。ビルド結果は `gh codespace cp -r remote:/workspaces/melonDS_webassembly/web/dist web/ -c organic-fishstick-wrjpjx79qjwc5qgr -e`。配布Actionsは `web/sandbox/upstream` の `npm ci --ignore-scripts` 後、同梱の `build-workers.mjs` で原本Workerを生成し、外部DeSmuMEレポジトリをcheckoutしない。
 
-初回構成で `ENABLE_GDBSTUB=OFF` にするとforkの`ARM.cpp`がコンパイルエラー。ONで解消。coreライブラリに`-pthread`がないとWasm共有メモリlinkエラー。CMakeで解消し、当初版のWasmリンクは正常終了。現時点の最新編集はビルド結果を確認すること（これはテストとは別のコンパイル確認）。
+初回構成で `ENABLE_GDBSTUB=OFF` にするとforkの`ARM.cpp`がコンパイルエラー。ONで解消。coreライブラリに`-pthread`がないとWasm共有メモリlinkエラー。CMakeで解消し、**並列化以前の版**のWasmリンクは正常終了。最新の並列化編集は未ビルド。
 
 ## 次の担当者が確認すべきこと（ユーザー指示のROM検証）
 
 1. `PLAN.md`/`WORK_DETAILS.md` と `sizisilyo.txt` を読む。今チャットの未実装項目を完成済みと誤認しない。
 2. Wasm/workerのロードにはCOOP/COEPによる`crossOriginIsolated`が必要。`web/coi-serviceworker.js` は静的ホスト向けに設けた。localhost/HTTPSで配信し、初回service worker install時は再読込される。
 3. 再配布可能なホームブリューROMでインスタンス0の画面とROMロードを確認。Save/Stateと画面表示を検証。ROMや個人データの本文をチャット／リポジトリへ出さない。
-4. 2台LocalMPの実ゲーム通信を検証し、`Local Communication Logger` の実packet TX/RX、SenderID、受信先、raw bytesを照合。最大16台で同時運転、状態・入力の分離とFPSを確認。現在は全インスタンスを単一Wasm Workerが順に進めるため、ブロッキング受信とLocalMPタイミングが課題になり得る。
+4. 2台LocalMPの実ゲーム通信を検証し、`Local Communication Logger` の実packet TX/RX、SenderID、受信先、raw bytesを照合。最大16台で同時運転、状態・入力の分離とFPSを確認。現行成果物は単一Wasm Workerの逐次版。ソースではpthread並列化の途中で止まっている（最優先欄）。
 5. Wi-Fiが `Net_SendPacket` / `Net_RecvPacket` を通り、raw loggerに記録されることを確認。`dq9_micro_dwc_server_emulator.cpp-main` は参照であり、DNS/TCP/HTTP/DWC互換サービスは追加実装が必要。
 6. 元のscript supervisor/isolated Workerについて起動・登録・停止・MCP・callbackをブラウザで検証し、失敗時のqueue/timeout/cleanupを整合させる。native exec/read/write breakpoint hookがないため現在のbreakpoint callbackは拒否する。
 

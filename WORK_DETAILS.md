@@ -19,4 +19,9 @@
 - `webassembly/port.cpp` が16個の `NDS` と同一 `LocalMP` を保持し、Platformコールバックのuserdataで混線を防止。Wasm Workerは実処理完了を受けてPromiseを解決する。リセット/ROM/Save/State/レジスタ/メモリはコア経路へ。ステップ、breakpoint等は未対応なら明示エラー。
 - LocalMPは固定長ringへ実際の送受信raw bytesをコピーし取りこぼしを記録。Wi-Fiは `Platform::Net_SendPacket` と `Net_RecvPacket` 境界でraw Ethernetを観測し、ブラウザの仮想サーバーが返すraw frameを受信queueへ注入する。DNS/DWC等のプロトコルサービスはまだない。
 - WebMCPは主要名前ごとのtoolを登録し、AIへの結果はこのリポジトリへ取り込んだ元の `compact-output.js` の境界付きフラットテキストを利用。JSON本文の返却はしない。
+- バッチは同一instanceの明示ID付きコマンドを同期順序で実行する。操作IDを付けたAPIはqueue中/実行中/完了/失敗の状態を問い合わせられ、queue中だけキャンセル可能。実行中ネイティブ命令のキャンセルは未接続。メモリ検索はDSメインRAM上のbytesパターンに限定し、フリーズは各frame後に書き戻す方式。
 - JS単体チェックはユーザーが「テストするな」と指示する前に4件成功済み。以降のテストは行っていない。Wasm実機起動・ROM/通信・sandboxブラウザ動作は未検証。
+
+## 停止時点の重要な不整合（次チャット最優先）
+
+ユーザーの指示で並列化変更の途中で停止。`port.cpp` の `Instance` にstd::thread/coreMutex/atomic状態を入れ、共有Wasm上の各インスタンス用pthreadで `RunFrame` する方向へ変更したが、`engine.worker.js` のtimerとCMake export/pool設定は旧版。**最新ソースは未ビルドで現状のまま実行すると画面APIが一致せず動作しない**。`HANDOFF.md` 冒頭の具体的修正順序を参照。前回exit 0はこの変更以前の成果物である。

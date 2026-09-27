@@ -22,10 +22,12 @@ export async function registerWebMcp(api, modelContext = document.modelContext |
       type: 'object', properties: {
         ...(!globalTool ? { instanceId: { type: 'integer', minimum: 0, maximum: 15 } } : {}),
         ...(binaryTool ? { fileBase64: { type: 'string', description: 'Local ROM/state/save bytes, base64 encoded.' } } : {}),
-        ...(name === 'loadRomMany' ? { instanceIds: { type: 'array', items: { type: 'integer', minimum: 0, maximum: 15 }, minItems: 1, maxItems: 16 } } : {})
+        ...(name === 'loadRomMany' ? { instanceIds: { type: 'array', items: { type: 'integer', minimum: 0, maximum: 15 }, minItems: 1, maxItems: 16 } } : {}),
+        ...(['operationStatus', 'cancelOperation'].includes(name) ? { operationId: { type: 'string' } } : {})
       },
       required: [...(globalTool ? [] : ['instanceId']), ...(name === 'loadRom' || name === 'loadRomMany' || name === 'importSave' ? ['fileBase64'] : []),
-        ...(name === 'loadRomMany' ? ['instanceIds'] : [])], additionalProperties: true
+        ...(name === 'loadRomMany' ? ['instanceIds'] : []),
+        ...(['operationStatus', 'cancelOperation'].includes(name) ? ['operationId'] : [])], additionalProperties: true
     };
     try {
       await modelContext.registerTool({

@@ -88,10 +88,11 @@ h2 { font-size: 26px; letter-spacing: -.04em; margin-top: 6px; line-height: 1.2;
 .packet-table th, .packet-table td { border-bottom: 1px solid var(--line); padding: 7px 4px; text-align: left; overflow-wrap: anywhere; }
 .packet-table th { color: var(--tertiary); font-weight: 500; }
 .packet-table td:last-child { color: var(--signal); }
-.packet-table th:nth-child(1) { width: 72px; }
-.packet-table th:nth-child(2), .packet-table th:nth-child(3) { width: 42px; }
-.packet-table th:nth-child(4) { width: 64px; }
-.packet-table th:nth-child(5) { width: 46px; }
+.packet-table th:nth-child(1) { width: 84px; }
+.packet-table th:nth-child(2), .packet-table th:nth-child(4) { width: 42px; }
+.packet-table th:nth-child(3) { width: 86px; }
+.packet-table th:nth-child(5) { width: 64px; }
+.packet-table th:nth-child(6) { width: 46px; }
 .workspace-empty { padding: 24px; color: var(--tertiary); text-align: center; }
 @media (max-width: 1450px) { .workspace.grid { grid-template-columns: repeat(3, minmax(220px, 1fr)); } }
 @media (max-width: 1120px) { .workspace.grid { grid-template-columns: repeat(2, minmax(220px, 1fr)); } }
