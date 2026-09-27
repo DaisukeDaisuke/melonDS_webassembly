@@ -35,6 +35,7 @@ function checkedCode(code) {
 export function createScriptBackend(native) {
   const scripts = new Map();
   const capturedFrames = new Map();
+  const romHashes = new Map();
   let workerSources;
   const subscribers = new Set();
   let eventSerial = 0;
@@ -43,6 +44,18 @@ export function createScriptBackend(native) {
     return workerSources;
   };
   const key = (id, name) => `${id}:${name}`;
+  async function romHash(file) {
+    if (!(file instanceof Blob)) return null;
+    const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+  function requireMatchingRom(record, instanceId) {
+    if (!record) throw Error('No browser data for this instance');
+    if (!record.romHash || !romHashes.get(instanceId) || record.romHash !== romHashes.get(instanceId)) {
+      throw Error('Browser data was saved for a different ROM');
+    }
+    return record.blob;
+  }
   function waitOptions(args) {
     const timeoutMs = args.timeoutMs ?? 30000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw RangeError('timeoutMs must be 1..120000');
@@ -132,12 +145,26 @@ export function createScriptBackend(native) {
       throw Error('Nested script lifecycle calls are not permitted');
     }
     const args = bindArgs(record, command, params);
+    if (command === 'setInput') {
+      return { ok: true, value: await native.execute('input', {
+        instanceId: record.instanceId, key: String(params.button || params.key).toUpperCase(), pressed: !!params.pressed
+      }) };
+    }
+    if (command === 'stepFrames') {
+      return { ok: true, value: await waitFrames({ instanceId: record.instanceId, frames: params.frames ?? 1 }) };
+    }
     if (command === 'memoryGetRegister') {
       const registers = await native.execute('getRegisters', args);
-      return { ok: true, value: registers[params.register] };
+      const label = Number.isInteger(params.register) ? `r${params.register}` : String(params.register ?? params.reg ?? 'pc').toLowerCase();
+      const name = ({ pc: 'r15', lr: 'r14', sp: 'r13' })[label] || label;
+      if (!(name in registers)) throw Error(`Unknown register ${name}`);
+      return { ok: true, value: registers[name] };
     }
     if (command === 'memorySetRegister') {
-      return { ok: true, value: await native.execute('setRegister', args) };
+      const label = Number.isInteger(params.register) ? `r${params.register}` : String(params.register ?? params.reg).toLowerCase();
+      return { ok: true, value: await native.execute('setRegister', {
+        ...args, register: ({ pc: 'r15', lr: 'r14', sp: 'r13' })[label] || label
+      }) };
     }
     const width = ({ memoryReadByte: 1, memoryReadWord: 2, memoryReadDword: 4,
       memoryWriteByte: 1, memoryWriteWord: 2, memoryWriteDword: 4 })[command];
@@ -224,7 +251,10 @@ export function createScriptBackend(native) {
         }, error => {
           if (record.running) host.worker.postMessage({ replyId: message.id,
             error: { code: 'SCRIPT_RPC_ERROR', message: String(error?.message || error) } });
-        }).finally(() => record.pending.delete(message.id));
+        }).finally(() => {
+          record.pending.delete(message.id);
+          if (request.command === 'resume' && message.eventId) record.activeEvents.delete(message.eventId);
+        });
       } else if (message.type === 'compiled') {
         record.compiled = true;
       } else if (message.type === 'started') {
@@ -252,7 +282,7 @@ export function createScriptBackend(native) {
       else if (message.type === 'eventDone') {
         const active = record.activeEvents.get(message.eventId);
         if (active && active.callbackId === message.callbackId && active.callbackToken === message.callbackToken) {
-          active.done = true;
+          record.activeEvents.delete(message.eventId);
         }
       }
       else if (message.type === 'eventRelease') {
@@ -382,15 +412,15 @@ export function createScriptBackend(native) {
       if (name === 'saveStateToBrowser') {
         await native.execute('saveState', args);
         const bytes = await native.execute('exportState', args);
-        const stored = await sessionStore.put({ ...args, slot: args.slot ?? 0, data: bytes });
+        const stored = await sessionStore.put({ ...args, slot: args.slot ?? 0, data: bytes,
+          romHash: romHashes.get(args.instanceId) });
         await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
           .map(s => dispatch(s, 'stateSave', { instanceId: args.instanceId, slot: args.slot ?? 0 }, true)));
         return stored;
       }
       if (name === 'loadStateFromBrowser') {
         const slot = args.slot ?? 0;
-        const blob = await sessionStore.get({ instanceId: args.instanceId, slot });
-        if (!blob) throw Error('No browser savestate in this slot');
+        const blob = requireMatchingRom(await sessionStore.getRecord({ instanceId: args.instanceId, slot }), args.instanceId);
         const result = await native.execute('loadState', { ...args, slot, bytes: await blob.arrayBuffer() });
         await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
           .map(s => dispatch(s, 'stateLoad', { instanceId: args.instanceId, slot }, true)));
@@ -398,11 +428,11 @@ export function createScriptBackend(native) {
       }
       if (name === 'saveSaveToBrowser') {
         const bytes = await native.execute('exportSave', args);
-        return sessionStore.put({ instanceId: args.instanceId, slot: 'save', data: bytes });
+        return sessionStore.put({ instanceId: args.instanceId, slot: 'save', data: bytes,
+          romHash: romHashes.get(args.instanceId) });
       }
       if (name === 'loadSaveFromBrowser') {
-        const blob = await sessionStore.get({ instanceId: args.instanceId, slot: 'save' });
-        if (!blob) throw Error('No browser save for this instance');
+        const blob = requireMatchingRom(await sessionStore.getRecord({ instanceId: args.instanceId, slot: 'save' }), args.instanceId);
         return native.execute('importSave', { ...args, bytes: await blob.arrayBuffer() });
       }
       if (!persistentMethods.has(name)) {
@@ -412,7 +442,11 @@ export function createScriptBackend(native) {
             if (targets.includes(record.instanceId)) await stop({ instanceId: record.instanceId, name: record.name });
           }
         }
+        const hash = ['loadRom', 'loadRomMany'].includes(name) ? await romHash(args.file) : null;
         const result = await native.execute(name, args);
+        if (name === 'destroyInstance') romHashes.delete(args.instanceId);
+        if (name === 'loadRom') romHashes.set(args.instanceId, hash);
+        if (name === 'loadRomMany') for (const id of args.instanceIds) romHashes.set(id, hash);
         if (name === 'destroyInstance' || name === 'loadRom' || name === 'reset') capturedFrames.delete(args.instanceId);
         if (name === 'loadRomMany') for (const id of args.instanceIds) capturedFrames.delete(id);
         if (name === 'saveState' || name === 'loadState') {
@@ -435,6 +469,8 @@ export function createScriptBackend(native) {
       if (name === 'runScript') return runOnce(args);
     },
     setScreenTargets(instanceIds) { native.setScreenTargets(instanceIds); },
+    setAudioTargets(instanceIds) { native.setAudioTargets(instanceIds); },
+    cancelOperation(operationId) { native.cancelOperation(operationId); },
     subscribe(listener) { subscribers.add(listener); return () => subscribers.delete(listener); },
     close() { unsubscribe(); }
   };

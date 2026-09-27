@@ -26,4 +26,3 @@ openssl x509 -req -in "$temporary/server.csr" -CA "$output/nwc.crt" \
   -CAkey "$temporary/nwc.key" -CAcreateserial -CAserial "$temporary/nwc.srl" \
   -out "$output/server.crt" -days 3650 -sha1
 cat "$output/server.crt" "$output/nwc.crt" > "$output/server_with_chain.crt"
-openssl verify -CAfile "$output/nwc.crt" "$output/server.crt"

@@ -1,12 +1,15 @@
 import createModule from './dist/melonds.js';
+import { decodeInstructions } from './disassemble.js';
 
 let wasm;
 const ids = new Set();
 const romLoaded = new Set();
 const paused = new Set();
 const visibleScreens = new Set();
+const audibleInstances = new Set();
 const lastFrames = new Map();
 const debugWaiters = new Map();
+const cancelledOperations = new Set();
 const freezes = Array.from({ length: 16 }, () => new Map());
 const history = { 'local-log': [], 'wifi-log': [] };
 const masks = Array(16).fill(0xfff);
@@ -71,6 +74,7 @@ function execute(name, args) {
     const rom = new Uint8Array(args.bytes);
     for (const id of args.instanceIds) requireInstance(id);
     return withBytes(rom, pointer => args.instanceIds.map(id => {
+      debugWaiters.get(id)?.reject(Error('ROM replaced during debugger operation'));
       success(call('web_load_rom', id, pointer, rom.length), name);
       romLoaded.add(id); paused.delete(id); freezes[id].clear(); masks[id] = 0xfff;
       lastFrames.set(id, call('web_peek_frame_number', id)); return { instanceId: id };
@@ -87,6 +91,11 @@ function execute(name, args) {
     const bytes = new Uint8Array(args.data);
     if (bytes.length < 14 || bytes.length > 2048) throw Error('Ethernet frame length must be 14..2048');
     return withBytes(bytes, pointer => success(call('web_net_enqueue', id, pointer, bytes.length), name));
+  }
+  if (name === 'setNetworkBackend') {
+    if (!['virtual', 'disabled'].includes(args.backend)) throw Error('backend must be virtual or disabled');
+    success(call('web_net_backend', id, args.backend === 'virtual' ? 1 : 0), name);
+    return { instanceId: id, backend: args.backend };
   }
   if (name === 'destroyInstance') {
     debugWaiters.get(id)?.reject(Error('Instance destroyed during debugger operation'));
@@ -115,7 +124,8 @@ function execute(name, args) {
   if (name === 'status') {
     const isPaused = success(call('web_is_paused', id), name) !== 0;
     if (isPaused) paused.add(id); else paused.delete(id);
-    return { instanceId: id, loaded: romLoaded.has(id), paused: isPaused, frames: call('web_frame_number', id) };
+    return { instanceId: id, loaded: romLoaded.has(id), paused: isPaused, frames: call('web_frame_number', id),
+      networkBackend: call('web_net_backend_status', id) ? 'virtual' : 'disabled' };
   }
   if (['saveState', 'loadState', 'exportState'].includes(name)) {
     if (!romLoaded.has(id)) throw Error('Load a ROM first');
@@ -215,11 +225,38 @@ function execute(name, args) {
     for (const bp of selected) success(call('web_breakpoint_remove', id, bp.id), name);
     return { instanceId: id, removed: selected.length };
   }
+  if (name === 'callStack') {
+    const selectedCpu = cpu(args.cpu || 'ARM9');
+    const count = success(call('web_call_stack_count', id, selectedCpu), name);
+    const limit = positive(args.limit ?? 32, 128);
+    return withBytes(new Uint8Array(20), pointer => {
+      const frames = [];
+      for (let index = 0; index < Math.min(count, limit); index++) {
+        success(call('web_call_stack_entry', id, selectedCpu, index, pointer), name);
+        const view = new DataView(wasm.HEAPU8.buffer, pointer, 20);
+        frames.push({ caller: view.getUint32(0, true), callee: view.getUint32(4, true),
+          returnAddress: view.getUint32(8, true), sp: view.getUint32(12, true),
+          cpsr: view.getUint32(16, true), reconstructed: true });
+      }
+      return { instanceId: id, cpu: args.cpu || 'ARM9', frames, depth: count };
+    });
+  }
   if (name === 'getRegisters') {
     const registers = {};
     for (let n = 0; n < 16; n++) registers[`r${n}`] = call('web_register', id, cpu(args.cpu || 'ARM9'), n) >>> 0;
     registers.cpsr = call('web_register', id, cpu(args.cpu || 'ARM9'), 16) >>> 0;
     return registers;
+  }
+  if (name === 'disassemble') {
+    const count = positive(args.count ?? 16, 256);
+    const selectedCpu = cpu(args.cpu || 'ARM9');
+    const thumb = args.thumb ?? !!(call('web_register', id, selectedCpu, 16) & 0x20);
+    const width = thumb ? 2 : 4;
+    const size = Math.min(4096, count * width * (thumb ? 2 : 1));
+    return withBytes(new Uint8Array(size), pointer => {
+      success(call('web_read_memory', id, selectedCpu, args.address >>> 0, pointer, size), name);
+      return decodeInstructions(wasm.HEAPU8.slice(pointer, pointer + size), args.address >>> 0, count, thumb);
+    });
   }
   if (name === 'setRegister') {
     const n = args.register === 'cpsr' ? 16 : /^r(?:1[0-5]|[0-9])$/.test(args.register) ? Number(args.register.slice(1)) : -1;
@@ -240,17 +277,24 @@ function execute(name, args) {
     const length = positive(args.length ?? 0x400000, 0x400000);
     const pattern = new Uint8Array(args.pattern);
     positive(pattern.length, 256);
-    if (!Number.isInteger(address) || address < 0x02000000 || address + length > 0x02400000) {
-      throw Error('Search range must be within DS main RAM (02000000..023FFFFF)');
+    const selectedCpu = cpu(args.cpu || 'ARM9');
+    const regions = [[0x02000000, 0x02400000], [0x03000000, 0x03008000],
+      ...(selectedCpu === 7 ? [[0x03800000, 0x03810000]] : [])];
+    if (!Number.isInteger(address) || !regions.some(([start, end]) => address >= start && address + length <= end)) {
+      throw Error('Search range must be inside main RAM, shared WRAM, or ARM7 WRAM');
     }
     const limit = positive(args.limit ?? 100, 10000);
     const results = [];
     const chunk = 4096;
-    return withBytes(new Uint8Array(chunk + pattern.length - 1), pointer => {
+    return (async () => {
+      const pointer = call('malloc', chunk);
+      if (!pointer) throw Error('Wasm memory exhausted');
+      try {
       let overlap = new Uint8Array();
       for (let offset = 0; offset < length; offset += chunk) {
+        if (args.operationId && cancelledOperations.has(args.operationId)) throw Error('Operation cancelled');
         const count = Math.min(chunk, length - offset);
-        success(call('web_read_memory', id, cpu(args.cpu || 'ARM9'), address + offset, pointer, count), name);
+        success(call('web_read_memory', id, selectedCpu, address + offset, pointer, count), name);
         const current = wasm.HEAPU8.slice(pointer, pointer + count);
         const window = new Uint8Array(overlap.length + current.length);
         window.set(overlap); window.set(current, overlap.length);
@@ -261,9 +305,11 @@ function execute(name, args) {
           }
         }
         overlap = window.slice(Math.max(0, window.length - pattern.length + 1));
+        if (offset % (chunk * 16) === 0) await new Promise(resolve => setTimeout(resolve, 0));
       }
       return { addresses: results, truncated: false };
-    });
+      } finally { call('free', pointer); if (args.operationId) cancelledOperations.delete(args.operationId); }
+    })();
   }
   if (name === 'memoryFreeze') {
     const data = new Uint8Array(args.data);
@@ -282,14 +328,15 @@ function execute(name, args) {
   }
   if (name === 'batch') {
     if (!Array.isArray(args.commands) || args.commands.length > 64) throw Error('Batch must contain at most 64 commands');
-    return args.commands.map(item => {
-      if (!item || typeof item.name !== 'string' || item.name === 'batch'
-        || item.args?.instanceId !== id) throw Error('Every batch command must specify the same instanceId');
-      if (['step', 'stepOver', 'runUntil'].includes(item.name)) {
-        throw Error('Long-running debugger commands must be awaited outside a synchronous batch');
+    return (async () => {
+      const results = [];
+      for (const item of args.commands) {
+        if (!item || typeof item.name !== 'string' || item.name === 'batch'
+          || item.args?.instanceId !== id) throw Error('Every batch command must specify the same instanceId');
+        results.push(await execute(item.name, item.args));
       }
-      return execute(item.name, item.args);
-    });
+      return results;
+    })();
   }
   if (name === 'startInputRecording' || name === 'stopInputRecording') {
     if (!romLoaded.has(id)) throw Error('Load a ROM first');
@@ -298,6 +345,7 @@ function execute(name, args) {
   }
   if (name === 'getInputRecording') {
     const count = success(call('web_input_record_count', id), name);
+    const truncated = !!success(call('web_input_record_overflow', id), name);
     return withBytes(new Uint8Array(8), pointer => {
       const events = [];
       for (let index = 0; index < count; index++) {
@@ -305,13 +353,13 @@ function execute(name, args) {
         const view = new DataView(wasm.HEAPU8.buffer, pointer, 8);
         events.push({ frame: view.getUint32(0, true), mask: view.getUint32(4, true) });
       }
-      return events;
+      return { instanceId: id, events, truncated };
     });
   }
   if (name === 'inputSequence') {
     if (!romLoaded.has(id)) throw Error('Load a ROM first');
     const events = args.events;
-    if (!Array.isArray(events) || !events.length || events.length > 10000) throw Error('events must contain 1..10000 frame/mask pairs');
+    if (!Array.isArray(events) || !events.length || events.length > 100000) throw Error('events must contain 1..100000 frame/mask pairs');
     const bytes = new Uint8Array(events.length * 8), view = new DataView(bytes.buffer);
     let previous = -1;
     for (const [index, event] of events.entries()) {
@@ -363,6 +411,18 @@ function pollFrame(id) {
     const bottom = rgba(wasm.HEAPU8.slice(ptr + length, ptr + length * 2));
     postMessage({ type: 'event', event: { type: 'frame', instanceId: id, frame: number, top, bottom } }, [top.buffer, bottom.buffer]);
   } finally { call('free', ptr); }
+}
+function pollAudio(id) {
+  if (!romLoaded.has(id) || !audibleInstances.has(id)) return;
+  const capacity = 4096;
+  const pointer = call('malloc', capacity * 4);
+  if (!pointer) throw Error('Wasm memory exhausted while reading audio');
+  try {
+    const frames = call('web_read_audio', id, pointer, capacity);
+    if (frames <= 0) return;
+    const samples = new Int16Array(wasm.HEAPU8.slice(pointer, pointer + frames * 4).buffer);
+    postMessage({ type: 'event', event: { type: 'audio', instanceId: id, samples } }, [samples.buffer]);
+  } finally { call('free', pointer); }
 }
 function drainLogs() {
   const count = call('web_log_count');
@@ -439,6 +499,15 @@ onmessage = ({ data }) => {
     for (const id of data.instanceIds) if (Number.isInteger(id) && id >= 0 && id < 16) visibleScreens.add(id);
     return;
   }
+  if (data.type === 'audio-targets') {
+    audibleInstances.clear();
+    for (const id of data.instanceIds) if (Number.isInteger(id) && id >= 0 && id < 16) audibleInstances.add(id);
+    return;
+  }
+  if (data.type === 'cancel-operation') {
+    if (typeof data.operationId === 'string') cancelledOperations.add(data.operationId);
+    return;
+  }
   // Blob decoding yields to the event loop. Keep all native operations in
   // arrival order even if a second request arrives before decoding finishes.
   requests = requests.then(async () => {
@@ -458,7 +527,7 @@ onmessage = ({ data }) => {
 wasm = await createModule({ locateFile: path => new URL(`./dist/${path}`, import.meta.url).href });
 postMessage({ type: 'ready' });
 setInterval(() => {
-  for (const id of ids) pollFrame(id);
+  for (const id of ids) { pollFrame(id); pollAudio(id); }
   drainLogs();
   drainWifi();
   drainDebug();

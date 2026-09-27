@@ -35,6 +35,21 @@ test('bulk ROM load waits on affected instances and rejects duplicate ids', asyn
   assert.equal(calls[0][0], 'loadRomMany');
 });
 
+test('a running frame waiter is cancellable without blocking input for the same instance', async () => {
+  const api = createApi({ execute: async (name, args) => {
+    if (name !== 'waitFrames') return name;
+    return new Promise((_, reject) => args.signal.addEventListener('abort',
+      () => reject(Error('Operation cancelled')), { once: true }));
+  }});
+  const waiting = api.waitFrames({ instanceId: 3, frames: 20, operationId: 'frame-wait' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(await api.input({ instanceId: 3, key: 'A', pressed: true }), 'input');
+  const cancelled = await api.cancelOperation({ instanceId: 3, operationId: 'frame-wait' });
+  assert.equal(cancelled.cancelled, true);
+  await assert.rejects(waiting, /cancelled/);
+  assert.equal((await api.operationStatus({ instanceId: 3, operationId: 'frame-wait' })).status, 'cancelled');
+});
+
 test('layout persists each tile target and restores malformed storage safely', () => {
   const data = new Map();
   const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };

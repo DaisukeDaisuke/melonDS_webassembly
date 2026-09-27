@@ -38,7 +38,7 @@ function udpReply(frame, { sourceMac, sourceIp, targetIp, sourcePort, targetPort
 }
 
 export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0.100', mac = macDefault,
-  domains = {}, domainSuffixes = [], ignoreUnknownDomains = false } = {}) {
+  domains = {}, domainSuffixes = [], ignoreUnknownDomains = false, interceptDns = false } = {}) {
   const ip = ipv4(address);
   const clientIp = ipv4(clientAddress);
   const serverMac = Uint8Array.from(mac);
@@ -100,7 +100,7 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
         targetIp: Uint8Array.from([255, 255, 255, 255]), sourcePort: 67, targetPort: 68,
         payload: dhcp, broadcast: true });
     }
-    if (targetPort !== 53 || udpLength < 20 || !same(frame.subarray(start + 16, start + 20), ip)) return null;
+    if (targetPort !== 53 || udpLength < 20 || (!interceptDns && !same(frame.subarray(start + 16, start + 20), ip))) return null;
     const request = frame.subarray(udp + 8, udp + udpLength);
     if (request.length < 12 || (u16(request, 2) & 0x8000) || u16(request, 4) !== 1) return null;
     let cursor = 12, position = cursor, jumped = false, steps = 0, pointers = 0, ended = false;
@@ -139,7 +139,8 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       dns[questionEnd + 9] = 60; write16(dns, questionEnd + 10, 4);
       dns.set(answer, questionEnd + 12);
     }
-    return udpReply(frame, { sourceMac: serverMac, sourceIp: ip,
+    return udpReply(frame, { sourceMac: serverMac,
+      sourceIp: interceptDns ? frame.subarray(start + 16, start + 20) : ip,
       targetIp: frame.subarray(start + 12, start + 16), sourcePort: 53, targetPort: sourcePort, payload: dns });
   };
 }

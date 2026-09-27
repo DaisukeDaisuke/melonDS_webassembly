@@ -52,6 +52,9 @@ export function createFileStore() {
         type: typeof data === 'string' ? 'text/plain;charset=utf-8' : 'application/octet-stream'
       });
       if (blob.size > (path.endsWith('/_list.txt') ? 1024 * 1024 : 16 * 1024 * 1024)) throw RangeError('DLC file is too large');
+      if (path.endsWith('/_list.txt')) {
+        new TextDecoder('utf-8', { fatal: true }).decode(await blob.arrayBuffer());
+      }
       await transact('readwrite', store => store.put({ path, blob, updatedAt: Date.now() }));
       return { path, size: blob.size, type: blob.type };
     },

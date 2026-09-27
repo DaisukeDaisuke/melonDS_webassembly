@@ -18,11 +18,15 @@ void saveNDSToInstance(const u8*, u32, void*);
 LocalMP& localMultiplayer();
 static std::mutex netLock;
 static std::array<std::deque<WebNetFrame>, 16> netPending;
+static std::array<bool, 16> netEnabled = [] {
+    std::array<bool, 16> result {}; result.fill(true); return result;
+}();
 static std::deque<WebNetFrame> netEvents;
 static u32 netDropped = 0;
 int WebNetEnqueue(int instanceId, const u8* data, int length) {
     if (instanceId < 0 || instanceId >= 16 || !data || length < 14 || length > 2048) return -1;
     std::lock_guard<std::mutex> lock(netLock);
+    if (!netEnabled[instanceId]) return -3;
     if (netPending[instanceId].size() >= 256) return -2;
     WebNetFrame frame {GetUSCount(), instanceId, length, true, {}};
     memcpy(frame.data.data(), data, length);
@@ -33,6 +37,18 @@ void WebNetClear(int instanceId) {
     if (instanceId < 0 || instanceId >= 16) return;
     std::lock_guard<std::mutex> lock(netLock);
     netPending[instanceId].clear();
+}
+int WebNetSetEnabled(int instanceId, bool enabled) {
+    if (instanceId < 0 || instanceId >= 16) return -1;
+    std::lock_guard<std::mutex> lock(netLock);
+    netEnabled[instanceId] = enabled;
+    netPending[instanceId].clear();
+    return 0;
+}
+int WebNetGetEnabled(int instanceId) {
+    if (instanceId < 0 || instanceId >= 16) return -1;
+    std::lock_guard<std::mutex> lock(netLock);
+    return netEnabled[instanceId] ? 1 : 0;
 }
 int WebNetDrain(WebNetFrame* out, int capacity, u32* dropped) {
     if (!out || capacity < 0) return -1;
@@ -148,6 +164,7 @@ int Net_RecvPacket(u8* data, void* userdata) {
     const int instance = id(userdata);
     if (instance < 0 || instance >= 16 || !data) return 0;
     std::lock_guard<std::mutex> lock(netLock);
+    if (!netEnabled[instance]) return 0;
     auto& pending = netPending[instance];
     if (pending.empty()) return 0;
     WebNetFrame frame = std::move(pending.front()); pending.pop_front();

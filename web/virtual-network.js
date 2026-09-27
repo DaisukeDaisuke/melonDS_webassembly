@@ -14,20 +14,24 @@ export function createVirtualNetwork(api) {
   function register({ instanceId: id, onFrame }) {
     instanceId(id);
     if (typeof onFrame !== 'function') throw new TypeError('onFrame must be a function');
+    servers.get(id)?.close?.();
     servers.set(id, onFrame);
-    return () => { if (servers.get(id) === onFrame) servers.delete(id); };
+    return () => { if (servers.get(id) === onFrame) { servers.delete(id); onFrame.close?.(); } };
   }
   function registerDq9Wfc({ instanceId: id, address = '10.0.0.1', clientAddress = '10.0.0.100',
     mac = [0x02, 0x4d, 0x44, 0x53, 0, 1], dlc = {}, certificatePem, privateKeyPem, chainPem } = {}) {
     const handler = createDq9WfcHandler({ dlc, getFile: ({ gamecd, name }) => files.get({ path: dlcPath(gamecd, name) }) });
     const lan = createLanService({ address, clientAddress, mac, domainSuffixes: ['nintendowifi.net'],
-      ignoreUnknownDomains: true });
+      ignoreUnknownDomains: true, interceptDns: true });
     const onRequest = async request => httpBytes(await handler.handle(request));
     if (!!certificatePem !== !!privateKeyPem) throw new TypeError('SSLv3 certificate and private key must be provided together');
     const createSecureSession = certificatePem
       ? createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRequest }) : null;
-    const tcp = createTcpService({ address, mac, onRequest, createSecureSession });
-    const unregister = register({ instanceId: id, onFrame: frame => lan(frame) || tcp(frame) });
+    const tcp = createTcpService({ address, mac, onRequest, createSecureSession,
+      emitFrame: frame => api.injectNetworkFrame({ instanceId: id, data: frame }) });
+    const onFrame = frame => lan(frame) || tcp(frame);
+    onFrame.close = () => tcp.close();
+    const unregister = register({ instanceId: id, onFrame });
     return Object.freeze({ setDlc: (game, files) => handler.setDlc(game, files), unregister });
   }
   const unsubscribe = api.subscribe(event => {
@@ -64,7 +68,7 @@ export function createVirtualNetwork(api) {
         }));
       return registerDq9Wfc({ ...options, certificatePem, privateKeyPem, chainPem });
     },
-    unregister({ instanceId: id }) { instanceId(id); servers.delete(id); },
-    close() { servers.clear(); unsubscribe(); }
+    unregister({ instanceId: id }) { instanceId(id); servers.get(id)?.close?.(); servers.delete(id); },
+    close() { for (const service of servers.values()) service.close?.(); servers.clear(); unsubscribe(); }
   });
 }

@@ -1,5 +1,25 @@
 # 次チャットへの引き継ぎ（melonDS WebAssembly Web Debugger）
 
+## 2026-09-27 最終引き継ぎ（この節と `PLAN.md` 最終節を最優先）
+
+本日ユーザー指示で作業終了。**今はビルドしない。Web上のデバッグも試みない。** `sizisilyo.txt` の19完成条件と `PLAN.md`/`WORK_DETAILS.md` にある全計画の実装を終える前にビルドへ進まない。gitコマンドは使用しない。外部の `desmume_webassembly-main` ディレクトリには依存させない。Codespaceへの転送が必要になった場合は `gh codespace cp -e` を必ず付け、ビルドは後日 `build-async.sh` で非同期実施する。
+
+今回ソースは大きく変わったが、pthread化以降の **C++/Wasmは未ビルド・未リンク・ROM未起動・ブラウザ未検証**。`web/dist/melonds.*` は古い逐次版なので新Workerとの動作根拠にならない。最後に実行したNode単体テストは10件成功（`web/tests/api.test.js` に最後に加えたテストは未実行）。Codespace `organic-fishstick-wrjpjx79qjwc5qgr` の `web/`/`webassembly/` は途中段階のコピーで、最後の編集と `melonDS_w/src` のARM/CP15変更はまだ反映されていない。
+
+**次回の最初の行動:** `PLAN.md` の「2026-09-27 作業終了時点」および「ビルド着手条件」を読む。`webassembly/port.cpp` のデバッガcoreMutex解放・条件変数・abort/Stateフレーム境界、`melonDS_w/src/{ARM.cpp,CP15.cpp}` のinterpreter hook、`web/engine.worker.js`・`script-service.js` の非同期応答/ブレークポイントcallback、CMake exports整合を静的に点検して残りの仕様を実装する。ブラウザ動作や16台通信の成功を推測で記入しない。チェックアウト済みサブモジュールを直接編集している。不要なPythonパッチスクリプトはユーザーの指摘に従い撤去済み。
+
+DQ9側は `web/dq9/generate-certs.sh` に原本 `dummy-certs-linux` 相当の生成を実装し、同一オリジンの `web/dq9/certs/` をJSで読む設計。`server.crt` だけでなく元の `nwc.crt` も同じSSLv3 Certificateメッセージに含める。証明書はまだ実生成していない。DLCは独立File ExplorerタイルからIndexedDBの `/YDQJ/_list.txt` 等へUTF-8/バイナリをアップロードし、WFCハンドラがリクエスト時に参照する。こちらもブラウザ動作は未確認。
+
+以下にある前回・途中時点の記録は履歴であり、記述の「未整合」等を最新ソースの状態として扱わないこと。
+
+## 2026-09-27 状態更新（以下の旧「最優先」欄よりこちらが新しい）
+
+前回のpthread化とWorker/CMakeの画面API不整合はソース上修正済み。`_web_copy_frame`/`_web_peek_frame_number` の使用、表示中画面だけの画像送信、画面なしinstanceへの軽量tick、pthread上のfreeze処理を揃えた。デバッガ命令hook/step/breakpoint/Call Stack、音声、入力記録/再生、ブラウザ内Save/State保存、DQ9仮想LAN/SSLv3/ファイルタイルなどを追加実装中。**これらの新しいC++変更は一度もビルドされておらず、ブラウザ・ROM・LocalMP/DQ9通信でも未検証**。`PLAN.md` の最新状況/ビルド着手条件を優先する。
+
+ユーザーの最新指示: 全計画の実装を終える前にビルドへ進まない。実施する場合は非同期、Codespace転送は `gh codespace cp -e` 必須。Web上でのデバッグは禁止中。git操作は行わない。チェックアウト済み `melonDS_w` を直接編集しており、余分なPython差分適用スクリプトは撤去した。外部の `desmume_webassembly-main` ディレクトリに依存させない。DQ9証明書は元のdummy-certs-linux手順を `web/dq9/generate-certs.sh` とCIに取り込み、同一オリジンの `web/dq9/certs/` からleaf+元のnwc.crtチェーンをロードする実装。証明書の実生成と画面動作はまだ確認していない。
+
+以下は以前の引継ぎ記録で、旧「未整合」「未実装」の記述が現ソースと食い違う箇所がある。最新の実施状況は必ず `PLAN.md` と現ソースを参照すること。
+
 ## 最優先: 直近の未完了変更を先に整合させる
 
 ユーザーの指示により、**並列化の途中で作業を停止した**。直近の `webassembly/port.cpp` は `NDS` ごとにpthreadを起こし、共有Wasmメモリ内のLocalMPを実際に共有する方向へ変更したが、**この変更後のビルドは実行していない**。ROM動作も検証していない。現状を完成版として使わないこと。

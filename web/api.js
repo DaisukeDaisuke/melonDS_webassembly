@@ -19,16 +19,16 @@ const METHODS = Object.freeze({
   writeMemory: 'instance', memorySearch: 'instance', memoryFreeze: 'instance',
   listMemoryFreezes: 'instance', removeMemoryFreeze: 'instance',
   disassemble: 'instance', addBreakpoint: 'instance',
-  removeBreakpoint: 'instance', listBreakpoints: 'instance', input: 'instance',
+  removeBreakpoint: 'instance', listBreakpoints: 'instance', callStack: 'instance', input: 'instance',
   startInputRecording: 'instance', stopInputRecording: 'instance', getInputRecording: 'instance',
   inputSequence: 'instance', stopInputSequence: 'instance',
   screenshot: 'instance', localCommLog: 'instance', wifiLog: 'instance',
   captureFrame: 'instance', compareFrames: 'instance',
-  injectNetworkFrame: 'instance',
+  injectNetworkFrame: 'instance', setNetworkBackend: 'instance',
   runScript: 'instance', startPersistentScript: 'instance',
   stopPersistentScript: 'instance', restartPersistentScript: 'instance',
   listPersistentScripts: 'instance', callPersistentScriptMcp: 'instance',
-  batch: 'instance', operationStatus: 'instance', cancelOperation: 'instance',
+  batch: 'instance', operationStatus: 'global', cancelOperation: 'global',
   waitFrames: 'instance', waitMemory: 'instance'
 });
 
@@ -49,10 +49,22 @@ export function createApi(backend) {
     if (METHODS[name] === 'instance') instanceId(args.instanceId);
     if (name === 'operationStatus' || name === 'cancelOperation') {
       const operation = operations.get(args.operationId);
-      if (!operation || !operation.ids.includes(args.instanceId)) throw new Error('Operation not found for this instance');
-      if (name === 'operationStatus') return Promise.resolve({ operationId: args.operationId, status: operation.status });
+      if (!operation) throw new Error('Operation not found');
+      if (operation.ids.length && !operation.ids.includes(instanceId(args.instanceId))) {
+        throw new Error('Operation not found for this instance');
+      }
+      if (name === 'operationStatus') return Promise.resolve({ operationId: args.operationId,
+        status: operation.status, instanceIds: [...operation.ids],
+        createdAt: operation.createdAt, startedAt: operation.startedAt, finishedAt: operation.finishedAt,
+        ...(operation.error ? { error: operation.error } : {}) });
       if (operation.status === 'running' && operation.controller) {
         operation.controller.abort();
+        return operation.promise.then(() => ({ operationId: args.operationId, cancelled: false, status: operation.status }),
+          () => ({ operationId: args.operationId, cancelled: operation.status === 'cancelled', status: operation.status }));
+      }
+      if (operation.status === 'running' && operation.cancellable && typeof backend.cancelOperation === 'function') {
+        operation.cancelRequested = true;
+        backend.cancelOperation(args.operationId);
         return operation.promise.then(() => ({ operationId: args.operationId, cancelled: false, status: operation.status }),
           () => ({ operationId: args.operationId, cancelled: operation.status === 'cancelled', status: operation.status }));
       }
@@ -83,7 +95,7 @@ export function createApi(backend) {
       if (typeof args.operationId !== 'string' || !args.operationId || args.operationId.length > 100 || operations.has(args.operationId)) {
         throw new TypeError('operationId must be a unique nonempty string of at most 100 characters');
       }
-      entry = { ids, status: 'queued', cancelled: false,
+      entry = { ids, status: 'queued', createdAt: Date.now(), cancelled: false, cancellable: name === 'memorySearch',
         controller: ['waitFrames', 'waitMemory'].includes(name) ? new AbortController() : null };
       operations.set(args.operationId, entry);
       if (operations.size > 512) {
@@ -99,13 +111,16 @@ export function createApi(backend) {
     const prior = Promise.all(ids.map(id => tails.get(id)?.catch(() => {}) || Promise.resolve()));
     const operation = prior.then(() => {
       if (entry?.cancelled) throw new Error('Operation cancelled before execution');
-      if (entry) entry.status = 'running';
+      if (entry) { entry.status = 'running'; entry.startedAt = Date.now(); }
       return backend.execute(name, entry?.controller ? { ...args, signal: entry.controller.signal } : args);
     }).then(result => {
-      if (entry) entry.status = 'completed';
+      if (entry) { entry.status = 'completed'; entry.finishedAt = Date.now(); }
       return result;
     }, error => {
-      if (entry) entry.status = entry.cancelled || entry.controller?.signal.aborted ? 'cancelled' : 'failed';
+      if (entry) {
+        entry.status = entry.cancelled || entry.cancelRequested || entry.controller?.signal.aborted ? 'cancelled' : 'failed';
+        entry.error = String(error?.message || error); entry.finishedAt = Date.now();
+      }
       throw error;
     });
     if (entry) entry.promise = operation;

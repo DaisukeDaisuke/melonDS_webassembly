@@ -38,6 +38,8 @@ export function createWasmBackend() {
       });
     },
     setScreenTargets(instanceIds) { worker.postMessage({ type: 'screens', instanceIds }); },
+    setAudioTargets(instanceIds) { worker.postMessage({ type: 'audio-targets', instanceIds }); },
+    cancelOperation(operationId) { worker.postMessage({ type: 'cancel-operation', operationId }); },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }
   };
 }

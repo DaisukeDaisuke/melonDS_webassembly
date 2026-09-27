@@ -12,6 +12,7 @@ const layout = loadLayout();
 const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
+const audio = { context: null, next: Array(16).fill(0) };
 globalThis.melonds = api;
 globalThis.melondsVirtualNetwork = createVirtualNetwork(api);
 globalThis.melondsFiles = globalThis.melondsVirtualNetwork.files;
@@ -24,6 +25,28 @@ function save() { saveLayout(layout); }
 function updateScreenTargets() {
   backend.setScreenTargets([...new Set(layout.tiles.filter(tile => tile.type === 'screen' && !tile.minimized)
     .map(tile => tile.instanceId))]);
+}
+function updateAudioTargets() {
+  backend.setAudioTargets([...new Set([...workspace.querySelectorAll('[data-type=screen]')]
+    .filter(node => node._audioActive)
+    .map(node => Number(node.querySelector('.instance-select').value)))]);
+}
+function playAudio({ instanceId, samples }) {
+  if (!audio.context || !samples?.length) return;
+  const frames = samples.length / 2;
+  const buffer = audio.context.createBuffer(2, frames, 48000);
+  const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
+  for (let n = 0; n < frames; n++) {
+    left[n] = samples[n * 2] / 32768;
+    right[n] = samples[n * 2 + 1] / 32768;
+  }
+  const source = audio.context.createBufferSource();
+  source.buffer = buffer; source.connect(audio.context.destination);
+  const now = audio.context.currentTime;
+  if (audio.next[instanceId] < now || audio.next[instanceId] > now + .25) audio.next[instanceId] = now + .02;
+  source.start(audio.next[instanceId]);
+  audio.next[instanceId] += frames / 48000;
+  source.onended = () => source.disconnect();
 }
 function apply(target, callback) {
   const button = target instanceof HTMLElement ? target : null;
@@ -95,7 +118,7 @@ function refreshSummary() {
 function addTile(type, x, y) {
   const top = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1;
   const tile = makeTile(type, { x: Math.max(0, x), y: Math.max(0, y), z: top });
-  layout.tiles.push(tile); save(); renderTile(tile); refreshSummary(); updateScreenTargets();
+  layout.tiles.push(tile); save(); renderTile(tile); refreshSummary(); updateScreenTargets(); updateAudioTargets();
 }
 function renderLog(body, tile) {
   const controls = row(body);
@@ -105,6 +128,10 @@ function renderLog(body, tile) {
   const pause = el('input'); pause.type = 'checkbox'; pause.checked = !!tile.settings.paused;
   const pauseLabel = el('label', '', ' 表示を停止'); pauseLabel.prepend(pause); controls.append(pauseLabel);
   controls.append(button('消去', () => { state.logs[tile.type] = []; update(); }));
+  if (tile.type === 'wifi-log') {
+    controls.append(button('仮想ネットワーク接続', () => api.setNetworkBackend({ instanceId: tile.instanceId, backend: 'virtual' })));
+    controls.append(button('ネットワーク切断', () => api.setNetworkBackend({ instanceId: tile.instanceId, backend: 'disabled' })));
+  }
   const table = el('table', 'packet-table');
   const head = el('thead'); const header = el('tr');
   for (const label of ['時刻', '方向', '送信/SenderID', '受信', '種別', '長さ', 'raw payload']) header.append(el('th', '', label));
@@ -143,7 +170,14 @@ function renderBody(body, tile, tileElement) {
     const top = el('canvas'); const bottom = el('canvas');
     top.width = bottom.width = 256; top.height = bottom.height = 192;
     top.setAttribute('aria-label', '上画面'); bottom.setAttribute('aria-label', '下画面');
-    stack.append(top, bottom, el('p', 'screen-hint', '256 × 192 / 2 DISPLAYS'));
+    const toggleAudio = button('▶ 音声開始', async () => {
+      if (!audio.context) audio.context = new AudioContext({ sampleRate: 48000 });
+      await audio.context.resume();
+      tileElement._audioActive = !tileElement._audioActive;
+      toggleAudio.textContent = tileElement._audioActive ? '■ 音声停止' : '▶ 音声開始';
+      updateAudioTargets();
+    });
+    stack.append(top, bottom, el('p', 'screen-hint', '256 × 192 / 2 DISPLAYS'), toggleAudio);
     body.append(stack);
     const draw = event => {
       if (event.type !== 'frame' || event.instanceId !== tile.instanceId) return;
@@ -160,12 +194,14 @@ function renderBody(body, tile, tileElement) {
   const output = readout(body);
   const act = (label, fn) => controls.append(button(label, async () => { output.textContent = fmt(await fn()); }));
   if (tile.type === 'debugger') {
+    tileElement._debugListener = event => { if (event.instanceId === tile.instanceId) output.textContent = fmt(event); };
     act('一時停止', () => api.pause(args())); act('再開', () => api.resume(args()));
     act('リセット', () => api.reset(args())); act('ステップ', () => api.step(args()));
     act('ステップオーバー', () => api.stepOver(args()));
     const address = textInput(controls, '到達PC (hex)', '02000000');
     act('指定位置まで', () => api.runUntil(args({ address: hex(address) })));
     act('状態取得', () => api.status(args()));
+    act('呼出履歴', () => api.callStack(args()));
     const frames = textInput(controls, '待つフレーム数', '60');
     act('フレーム待機', () => api.waitFrames(args({ frames: Number(frames.value) })));
   } else if (tile.type === 'memory') {
@@ -188,14 +224,21 @@ function renderBody(body, tile, tileElement) {
     act('逆アセンブル', () => api.disassemble(args({ address: hex(address), count: 16 })));
   } else if (tile.type === 'breakpoints') {
     const address = textInput(controls, 'アドレス (hex)', '02000000');
-    act('追加', () => api.addBreakpoint(args({ address: hex(address), type: 'execute' })));
+    const kind = el('select');
+    for (const value of ['execute', 'read', 'write']) kind.append(new Option(value, value));
+    controls.append(kind);
+    act('追加', () => api.addBreakpoint(args({ address: hex(address), type: kind.value })));
     act('削除', () => api.removeBreakpoint(args({ address: hex(address) })));
     act('一覧', () => api.listBreakpoints(args()));
   } else if (tile.type === 'input') {
     act('記録開始', () => api.startInputRecording(args()));
     act('記録停止', () => api.stopInputRecording(args()));
     act('入力履歴', () => api.getInputRecording(args()));
-    act('記録を再生', async () => api.inputSequence(args({ events: await api.getInputRecording(args()) })));
+    act('記録を再生', async () => {
+      const recording = await api.getInputRecording(args());
+      if (recording.truncated) throw Error('入力記録が上限を超えています');
+      return api.inputSequence(args({ events: recording.events }));
+    });
     act('再生停止', () => api.stopInputSequence(args()));
     for (const key of ['A', 'B', 'X', 'Y', 'L', 'R', 'START', 'SELECT', 'UP', 'DOWN', 'LEFT', 'RIGHT']) {
       const item = el('button', '', key); item.type = 'button';
@@ -290,7 +333,7 @@ function renderTile(tile) {
   const select = node.querySelector('.instance-select'); populateInstances(select, tile.instanceId);
   select.onchange = () => {
     tile.instanceId = Number(select.value); node.querySelector('.tile-id').textContent = `#${select.value.padStart(2, '0')}`;
-    save(); updateScreenTargets(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change'));
+    save(); updateScreenTargets(); updateAudioTargets(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change'));
   };
   const cpu = node.querySelector('.cpu-select'); cpu.value = tile.cpu;
   cpu.onchange = () => { tile.cpu = cpu.value; save(); };
@@ -298,7 +341,7 @@ function renderTile(tile) {
   const min = node.querySelector('.tile-minimize');
   min.onclick = () => { tile.minimized = !tile.minimized; node.classList.toggle('minimized', tile.minimized); min.setAttribute('aria-label', tile.minimized ? '展開' : '最小化'); save(); updateScreenTargets(); };
   node.classList.toggle('minimized', tile.minimized);
-  node.querySelector('.tile-close').onclick = () => { layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); updateScreenTargets(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
+  node.querySelector('.tile-close').onclick = () => { layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); updateScreenTargets(); updateAudioTargets(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
   node.style.zIndex = tile.z;
   if (layout.mode === 'free') place(node, tile);
   node.addEventListener('pointerdown', () => { tile.z = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1; node.style.zIndex = tile.z; save(); });
@@ -332,6 +375,7 @@ function renderLayout() {
   for (const [mode, id] of [['grid', '#grid-mode'], ['free', '#free-mode']]) $(id).setAttribute('aria-pressed', String(layout.mode === mode));
   refreshSummary();
   updateScreenTargets();
+  updateAudioTargets();
 }
 for (const type of TILE_TYPES) {
   const node = $('#palette-template').content.firstElementChild.cloneNode(true);
@@ -369,6 +413,11 @@ $('#rom-file').onchange = event => {
 };
 api.subscribe(event => {
   if (!event || typeof event !== 'object') return;
+  if (event.type === 'audio') { playAudio(event); return; }
+  if (event.type === 'breakpoint' || event.type === 'debug-stop') {
+    for (const tile of workspace.querySelectorAll('[data-type=debugger]')) tile._debugListener?.(event);
+    return;
+  }
   if (event.type === 'frame') {
     for (const tile of workspace.querySelectorAll('[data-type=screen]')) tile._frameListener?.(event);
     return;

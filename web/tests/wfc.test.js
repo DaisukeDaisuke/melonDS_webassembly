@@ -118,7 +118,7 @@ test(`SSLv3 RSA/RC4-${algorithm} handshake decrypts an HTTP request on the priva
   const server = createSsl3Server({
     certificatePem: '-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----',
     chainPem: '-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----',
-    privateKeyPem: privateKey.export({ type: 'pkcs1', format: 'pem' }),
+    privateKeyPem: privateKey.export({ type: suite === 5 ? 'pkcs8' : 'pkcs1', format: 'pem' }),
     onRequest: async request => httpBytes({ status: 200, headers: {}, body: request.body })
   });
   const session = server();

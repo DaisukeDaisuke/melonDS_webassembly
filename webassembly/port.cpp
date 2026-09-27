@@ -42,6 +42,13 @@ struct DebugEvent {
     unsigned pc;
     unsigned frame;
 };
+struct TraceFrame {
+    unsigned caller;
+    unsigned callee;
+    unsigned returnAddress;
+    unsigned sp;
+    unsigned cpsr;
+};
 struct Instance {
     int id;
     std::unique_ptr<melonDS::NDS> nds;
@@ -54,6 +61,7 @@ struct Instance {
     unsigned scheduleStart = 0;
     size_t scheduleOffset = 0;
     bool recording = false;
+    bool recordingOverflow = false;
     std::vector<Breakpoint> breakpoints;
     unsigned nextBreakpointId = 1;
     std::mutex debugMutex;
@@ -62,6 +70,10 @@ struct Instance {
     bool frameActive = false; // debugMutex
     bool debugSuspended = false; // debugMutex
     bool abortFrame = false; // debugMutex
+    bool checkpointRequested = false; // debugMutex
+    bool checkpointMode = false; // coreMutex
+    int checkpointSlot = 0; // coreMutex
+    int checkpointResult = -3; // debugMutex
     bool stepActive = false; // coreMutex
     int stepCpu = 9; // coreMutex
     bool untilActive = false; // coreMutex
@@ -72,6 +84,9 @@ struct Instance {
     int watchKind = 0; // coreMutex
     unsigned watchId = 0; // coreMutex
     unsigned watchAddress = 0; // coreMutex
+    std::array<std::vector<TraceFrame>, 2> callTrace;
+    std::array<unsigned, 2> beforeLr {};
+    std::array<bool, 2> beforeThumb {};
     std::mutex coreMutex;
     std::mutex wakeMutex;
     std::condition_variable wake;
@@ -101,9 +116,32 @@ void abortActiveFrame(Instance* inst) {
     if (!inst->frameActive) return;
     inst->paused = true;
     inst->abortFrame = true;
+    if (inst->checkpointRequested) {
+        inst->checkpointRequested = false;
+        inst->checkpointResult = -3;
+    }
     inst->debugWake.notify_all();
     inst->debugWake.wait(lock, [inst] { return !inst->frameActive; });
     inst->abortFrame = false;
+}
+bool abortSuspendedFrame(Instance* inst) {
+    bool suspended;
+    {
+        std::lock_guard<std::mutex> lock(inst->debugMutex);
+        suspended = inst->debugSuspended;
+    }
+    if (suspended) abortActiveFrame(inst);
+    return suspended;
+}
+int saveStateLocked(Instance* inst, int slot) {
+    if (!inst->nds->CartInserted()) return -1;
+    melonDS::Savestate file;
+    if (!inst->nds->DoSavestate(&file) || file.Error) return -2;
+    file.Finish();
+    if (file.Error) return -2;
+    const auto* data = static_cast<const melonDS::u8*>(file.Buffer());
+    inst->states[slot].assign(data, data + file.Length());
+    return static_cast<int>(inst->states[slot].size());
 }
 void runFrames(Instance* inst) {
     using clock = std::chrono::steady_clock;
@@ -132,6 +170,15 @@ void runFrames(Instance* inst) {
                     inst->frameLock = &guard;
                 }
                 inst->nds->RunFrame();
+                if (inst->checkpointMode) {
+                    const int result = saveStateLocked(inst, inst->checkpointSlot);
+                    inst->checkpointMode = false;
+                    inst->paused = true;
+                    std::lock_guard<std::mutex> debugLock(inst->debugMutex);
+                    inst->checkpointResult = result;
+                    inst->checkpointRequested = false;
+                    inst->debugWake.notify_all();
+                }
                 {
                     std::lock_guard<std::mutex> debugLock(inst->debugMutex);
                     inst->frameActive = false;
@@ -164,6 +211,9 @@ int loadStateLocked(Instance* inst, int slot) {
     if (inst->nds->DoSavestate(&file) && !file.Error) {
         inst->scheduledInput.clear(); inst->scheduleOffset = 0;
         inst->recording = false;
+        inst->stepActive = false; inst->untilActive = false;
+        inst->skipCpu = 0; inst->watchKind = 0;
+        for (auto& trace : inst->callTrace) trace.clear();
         inst->completedFrames = inst->nds->NumFrames;
         return 0;
     }
@@ -180,7 +230,7 @@ bool park(Instance* inst, ARM* cpu, int kind, unsigned id, unsigned address, uns
     std::unique_lock<std::mutex> state(inst->debugMutex);
     inst->paused = true;
     inst->debugSuspended = true;
-    if (kind == 1) { inst->skipCpu = cpu->Num ? 7 : 9; inst->skipAddress = address; }
+    if (kind == 1 || kind == 5) { inst->skipCpu = cpu->Num ? 7 : 9; inst->skipAddress = address; }
     inst->stepActive = false;
     inst->untilActive = false;
     queueDebugEvent({inst->id, cpu->Num ? 7 : 9, kind, id, address, pc, inst->nds->NumFrames});
@@ -210,19 +260,37 @@ bool BeforeInstruction(ARM* cpu, u32 address) {
             return false;
         }
     }
+    if (inst->checkpointMode) return true;
     const int which = cpu->Num ? 7 : 9;
     if (inst->paused.load() && !park(inst, cpu, 6, 0, address, address)) return false;
+    if (inst->checkpointMode) return true;
     // Pausing releases coreMutex; a concurrent reset may abort this frame.
     if (!cpu->NDS.IsRunning()) return false;
+    const unsigned currentAddress = cpu->R[15] - ((cpu->CPSR & 0x20) ? 2 : 4);
+    if (currentAddress != address) return BeforeInstruction(cpu, currentAddress);
     if (inst->skipCpu == which && inst->skipAddress == address) inst->skipCpu = 0;
     else {
-        if (inst->untilActive && inst->untilCpu == which && inst->untilAddress == address)
-            return park(inst, cpu, 5, 0, address, address);
+        if (inst->untilActive && inst->untilCpu == which && inst->untilAddress == address) {
+            const bool continueFrame = park(inst, cpu, 5, 0, address, address);
+            if (continueFrame) {
+                inst->beforeLr[cpu->Num] = cpu->R[14];
+                inst->beforeThumb[cpu->Num] = !!(cpu->CPSR & 0x20);
+            }
+            return continueFrame;
+        }
         for (const auto& bp : inst->breakpoints) {
-            if (bp.kind == 1 && bp.cpu == which && bp.address == address)
-                return park(inst, cpu, 1, bp.id, address, address);
+            if (bp.kind == 1 && bp.cpu == which && bp.address == address) {
+                const bool continueFrame = park(inst, cpu, 1, bp.id, address, address);
+                if (continueFrame) {
+                    inst->beforeLr[cpu->Num] = cpu->R[14];
+                    inst->beforeThumb[cpu->Num] = !!(cpu->CPSR & 0x20);
+                }
+                return continueFrame;
+            }
         }
     }
+    inst->beforeLr[cpu->Num] = cpu->R[14];
+    inst->beforeThumb[cpu->Num] = !!(cpu->CPSR & 0x20);
     return true;
 }
 void MemoryAccess(ARM* cpu, u32 address, u32 size, bool write) {
@@ -241,6 +309,25 @@ void MemoryAccess(ARM* cpu, u32 address, u32 size, bool write) {
 void AfterInstruction(ARM* cpu, u32 address) {
     auto* inst = static_cast<Instance*>(cpu->NDS.UserData);
     if (!inst) return;
+    if (inst->checkpointMode) { inst->watchKind = 0; return; }
+    const unsigned opcode = cpu->CurInstr;
+    const bool thumb = inst->beforeThumb[cpu->Num];
+    const bool call = thumb ? ((opcode & 0xf800) == 0xf800 || (opcode & 0xff87) == 0x4780)
+        : ((opcode & 0x0f000000) == 0x0b000000
+            || (opcode & 0xfe000000) == 0xfa000000
+            || (opcode & 0x0ffffff0) == 0x012fff30);
+    const unsigned target = cpu->R[15] - ((cpu->CPSR & 0x20) ? 2 : 4);
+    auto& trace = inst->callTrace[cpu->Num];
+    if (call && cpu->R[14] != inst->beforeLr[cpu->Num]) {
+        if (trace.size() >= 128) trace.erase(trace.begin());
+        trace.push_back({address, target, cpu->R[14] & ~1u, cpu->R[13], cpu->CPSR});
+    } else {
+        for (size_t i = trace.size(); i > 0; --i) {
+            if (trace[i - 1].returnAddress == (target & ~1u)) {
+                trace.resize(i - 1); break;
+            }
+        }
+    }
     if (inst->watchKind) {
         const int kind = inst->watchKind;
         const unsigned id = inst->watchId, watched = inst->watchAddress;
@@ -278,6 +365,7 @@ EMSCRIPTEN_KEEPALIVE int web_destroy(int id) {
     inst->nds->Stop();
     melonDS::Platform::MP_End(inst);
     melonDS::Platform::WebNetClear(id);
+    melonDS::Platform::WebNetSetEnabled(id, true);
     instances[id].reset();
     return 0;
 }
@@ -298,8 +386,10 @@ EMSCRIPTEN_KEEPALIVE int web_load_rom(int id, const melonDS::u8* data, int lengt
     inst->freezes.clear();
     inst->breakpoints.clear(); inst->stepActive = false; inst->untilActive = false;
     inst->skipCpu = 0; inst->watchKind = 0;
+    for (auto& trace : inst->callTrace) trace.clear();
     inst->recordedInput.clear(); inst->scheduledInput.clear();
     inst->recording = false; inst->scheduleOffset = 0;
+    inst->recordingOverflow = false;
     inst->nds->Reset();
     inst->nds->SetupDirectBoot("web.nds");
     inst->nds->Start();
@@ -317,6 +407,7 @@ EMSCRIPTEN_KEEPALIVE int web_reset(int id) {
     inst->nds->Stop(); inst->nds->Reset();
     inst->scheduledInput.clear(); inst->recording = false;
     inst->stepActive = false; inst->untilActive = false; inst->watchKind = 0; inst->skipCpu = 0;
+    for (auto& trace : inst->callTrace) trace.clear();
     melonDS::Platform::MP_End(inst);
     melonDS::Platform::WebNetClear(id);
     if (inst->nds->CartInserted()) inst->nds->SetupDirectBoot("web.nds");
@@ -345,6 +436,10 @@ EMSCRIPTEN_KEEPALIVE int web_is_paused(int id) {
 EMSCRIPTEN_KEEPALIVE int web_frame(int id) {
     auto* inst = get(id); if (!inst) return -1;
     // Explicit frame step only while paused; normal frames run on its pthread.
+    {
+        std::lock_guard<std::mutex> debugLock(inst->debugMutex);
+        if (inst->debugSuspended) return -3;
+    }
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     if (!inst->paused.load()) return -2;
     if (!inst->nds->IsRunning()) return -1;
@@ -427,6 +522,22 @@ EMSCRIPTEN_KEEPALIVE int web_debug_event_entry(int index, unsigned* output) {
     output[6] = event.frame; output[7] = drainedDebugDropped;
     return 0;
 }
+EMSCRIPTEN_KEEPALIVE int web_call_stack_count(int id, int cpu) {
+    auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9)) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return static_cast<int>(inst->callTrace[cpu == 9 ? 0 : 1].size());
+}
+EMSCRIPTEN_KEEPALIVE int web_call_stack_entry(int id, int cpu, int index, unsigned* output) {
+    auto* inst = get(id); if (!inst || !output || (cpu != 7 && cpu != 9)) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    const auto& frames = inst->callTrace[cpu == 9 ? 0 : 1];
+    if (index < 0 || static_cast<size_t>(index) >= frames.size()) return -1;
+    const auto& frame = frames[frames.size() - 1 - index];
+    output[0] = frame.caller; output[1] = frame.callee;
+    output[2] = frame.returnAddress; output[3] = frame.sp;
+    output[4] = frame.cpsr;
+    return 0;
+}
 EMSCRIPTEN_KEEPALIVE int web_register(int id, int cpu, int reg) {
     auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9) || reg < 0 || reg > 16) return 0;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
@@ -487,9 +598,9 @@ EMSCRIPTEN_KEEPALIVE int web_key_mask(int id, unsigned mask) {
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     inst->nds->SetKeyMask(mask);
     if (inst->recording) {
-        if (inst->recordedInput.size() < 10000)
+        if (inst->recordedInput.size() < 100000)
             inst->recordedInput.push_back({inst->nds->NumFrames - inst->recordStart, mask});
-        else inst->recording = false;
+        else { inst->recording = false; inst->recordingOverflow = true; }
     }
     return 0;
 }
@@ -502,6 +613,7 @@ EMSCRIPTEN_KEEPALIVE int web_input_record_start(int id) {
     auto* inst = get(id); if (!inst) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     inst->recordedInput.clear(); inst->recordStart = inst->nds->NumFrames;
+    inst->recordingOverflow = false;
     inst->recording = true;
     return 0;
 }
@@ -516,6 +628,11 @@ EMSCRIPTEN_KEEPALIVE int web_input_record_count(int id) {
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     return static_cast<int>(inst->recordedInput.size());
 }
+EMSCRIPTEN_KEEPALIVE int web_input_record_overflow(int id) {
+    auto* inst = get(id); if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return inst->recordingOverflow ? 1 : 0;
+}
 EMSCRIPTEN_KEEPALIVE int web_input_record_entry(int id, int index, unsigned* output) {
     auto* inst = get(id); if (!inst || !output) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
@@ -525,7 +642,7 @@ EMSCRIPTEN_KEEPALIVE int web_input_record_entry(int id, int index, unsigned* out
     return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_input_schedule(int id, const InputEvent* events, int count) {
-    auto* inst = get(id); if (!inst || !events || count < 0 || count > 10000) return -1;
+    auto* inst = get(id); if (!inst || !events || count < 0 || count > 100000) return -1;
     for (int n = 0; n < count; ++n) {
         if (events[n].mask > 0xfff || (n && events[n].frame < events[n - 1].frame)) return -2;
     }
@@ -543,19 +660,42 @@ EMSCRIPTEN_KEEPALIVE int web_input_schedule_stop(int id) {
 }
 EMSCRIPTEN_KEEPALIVE int web_save_state(int id, int slot) {
     auto* inst = get(id); if (!inst || slot < 0 || slot >= 10) return -1;
-    std::lock_guard<std::mutex> guard(inst->coreMutex);
-    if (!inst->nds->CartInserted()) return -1;
-    melonDS::Savestate file;
-    if (!inst->nds->DoSavestate(&file) || file.Error) return -2;
-    file.Finish();
-    if (file.Error) return -2;
-    const auto* data = static_cast<const melonDS::u8*>(file.Buffer());
-    inst->states[slot].assign(data, data + file.Length());
-    return static_cast<int>(inst->states[slot].size());
+    bool suspended;
+    {
+        std::lock_guard<std::mutex> state(inst->debugMutex);
+        suspended = inst->debugSuspended;
+    }
+    if (!suspended) {
+        std::lock_guard<std::mutex> guard(inst->coreMutex);
+        return saveStateLocked(inst, slot);
+    }
+    // A savestate taken inside RunFrame would lose its scheduler continuation.
+    // Finish that frame without new traps, checkpoint at its real boundary,
+    // and return only after the runner has committed the slot.
+    {
+        std::lock_guard<std::mutex> guard(inst->coreMutex);
+        if (!inst->nds->CartInserted()) return -1;
+        std::lock_guard<std::mutex> state(inst->debugMutex);
+        inst->checkpointSlot = slot;
+        inst->checkpointMode = true;
+        inst->checkpointResult = -3;
+        inst->checkpointRequested = true;
+        inst->paused = false;
+        inst->debugWake.notify_all();
+    }
+    std::unique_lock<std::mutex> state(inst->debugMutex);
+    inst->debugWake.wait(state, [inst] { return !inst->checkpointRequested || !inst->alive.load(); });
+    return inst->checkpointResult;
 }
 EMSCRIPTEN_KEEPALIVE int web_load_state(int id, int slot) {
-    auto* inst = get(id); if (!inst) return -1;
+    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10) return -1;
+    {
+        std::lock_guard<std::mutex> guard(inst->coreMutex);
+        if (inst->states[slot].empty()) return -1;
+    }
+    const bool stopped = abortSuspendedFrame(inst);
     std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (stopped) inst->nds->Start();
     return loadStateLocked(inst, slot);
 }
 EMSCRIPTEN_KEEPALIVE int web_state_size(int id, int slot) {
@@ -574,7 +714,9 @@ EMSCRIPTEN_KEEPALIVE int web_state_export(int id, int slot, melonDS::u8* dest, i
 EMSCRIPTEN_KEEPALIVE int web_state_import(int id, int slot, const melonDS::u8* data, int length) {
     auto* inst = get(id);
     if (!inst || slot < 0 || slot >= 10 || !data || length < 8 || length > 64 * 1024 * 1024) return -1;
+    const bool stopped = abortSuspendedFrame(inst);
     std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (stopped) inst->nds->Start();
     auto previous = std::move(inst->states[slot]);
     inst->states[slot].assign(data, data + length);
     const int result = loadStateLocked(inst, slot);
@@ -614,6 +756,11 @@ EMSCRIPTEN_KEEPALIVE int web_copy_frame(int id, melonDS::u8* destination, int ca
     memcpy(destination + kOneScreenBytes, bottom, kOneScreenBytes);
     return kOneScreenBytes * 2;
 }
+EMSCRIPTEN_KEEPALIVE int web_read_audio(int id, melonDS::s16* destination, int frames) {
+    auto* inst = get(id); if (!inst || !destination || frames < 1 || frames > 4096) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return inst->nds->SPU.ReadOutput(destination, frames);
+}
 static std::array<melonDS::LocalMP::PacketLogEntry, melonDS::LocalMP::kLogCapacity> logs;
 static unsigned logCount;
 static unsigned logDropped;
@@ -642,6 +789,15 @@ static unsigned netLogDropped;
 EMSCRIPTEN_KEEPALIVE int web_net_enqueue(int id, const melonDS::u8* bytes, int length) {
     if (!get(id)) return -1;
     return melonDS::Platform::WebNetEnqueue(id, bytes, length);
+}
+EMSCRIPTEN_KEEPALIVE int web_net_backend(int id, int enabled) {
+    auto* inst = get(id); if (!inst || (enabled != 0 && enabled != 1)) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return melonDS::Platform::WebNetSetEnabled(id, enabled != 0);
+}
+EMSCRIPTEN_KEEPALIVE int web_net_backend_status(int id) {
+    if (!get(id)) return -1;
+    return melonDS::Platform::WebNetGetEnabled(id);
 }
 EMSCRIPTEN_KEEPALIVE int web_net_log_count() {
     netLogCount = melonDS::Platform::WebNetDrain(netLogs.data(), netLogs.size(), &netLogDropped);

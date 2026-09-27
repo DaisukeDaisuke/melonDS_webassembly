@@ -29,15 +29,18 @@ function key(instanceId, slot) {
   return `${instanceId}:${slot}`;
 }
 export const sessionStore = Object.freeze({
-  async put({ instanceId, slot, data }) {
+  async put({ instanceId, slot, data, romHash }) {
     const name = key(instanceId, slot);
     const blob = data instanceof Blob ? data : new Blob([new Uint8Array(data)]);
     if (blob.size > 64 * 1024 * 1024) throw RangeError('State exceeds 64 MiB');
-    await access('readwrite', store => store.put({ key: name, blob, updatedAt: Date.now() }));
+    await access('readwrite', store => store.put({ key: name, blob, romHash, updatedAt: Date.now() }));
     return { instanceId, slot, size: blob.size };
   },
   async get({ instanceId, slot }) {
-    return (await access('readonly', store => store.get(key(instanceId, slot))))?.blob || null;
+    return (await this.getRecord({ instanceId, slot }))?.blob || null;
+  },
+  async getRecord({ instanceId, slot }) {
+    return await access('readonly', store => store.get(key(instanceId, slot))) || null;
   },
   async list({ instanceId }) {
     key(instanceId, 'save');

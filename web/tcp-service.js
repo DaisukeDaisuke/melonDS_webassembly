@@ -14,10 +14,27 @@ const ip = address => Uint8Array.from(address.split('.').map(Number));
 const equals = (a, b) => a.length === b.length && a.every((n, i) => n === b[i]);
 const text = new TextDecoder();
 
-export function createTcpService({ address, mac, onRequest, createSecureSession }) {
+export function createTcpService({ address, mac, onRequest, createSecureSession, emitFrame }) {
   const serverIp = ip(address);
   const serverMac = Uint8Array.from(mac);
   const connections = new Map();
+  let retransmitTimer;
+  function tick() {
+    const now = Date.now();
+    for (const [key, connection] of connections) {
+      if (now - connection.lastSeen > 120000 || connection.inflight?.retries >= 8) {
+        connections.delete(key);
+        continue;
+      }
+      if (connection.inflight && now - connection.inflight.sentAt > 500) {
+        connection.inflight.sentAt = now;
+        connection.inflight.retries++;
+        Promise.resolve(emitFrame(connection.inflight.frame)).catch(error => console.error('Virtual TCP retry failed', error));
+      }
+    }
+    if (!connections.size) { clearInterval(retransmitTimer); retransmitTimer = null; }
+  }
+  const inFlight = (end, frame) => ({ end, frame, sentAt: Date.now(), retries: 0 });
   function packet(connection, flags, data = new Uint8Array(), seq = connection.seq) {
     const out = new Uint8Array(14 + 20 + 20 + data.length);
     out.set(connection.mac); out.set(serverMac, 6); write16(out, 12, 0x0800);
@@ -48,7 +65,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession 
       if (connection.closing && !connection.finSent) {
         const frame = packet(connection, 0x11);
         connection.seq = (connection.seq + 1) >>> 0;
-        connection.inflight = { end: connection.seq, frame };
+        connection.inflight = inFlight(connection.seq, frame);
         connection.finSent = true;
         return frame;
       }
@@ -59,7 +76,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession 
       const frame = packet(connection, 0x18, bytes);
       connection.seq = (connection.seq + bytes.length) >>> 0;
       connection.position += bytes.length;
-      connection.inflight = { end: connection.seq, frame };
+      connection.inflight = inFlight(connection.seq, frame);
       return frame;
     }
     connection.output = null;
@@ -67,7 +84,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession 
     if (connection.closing && !connection.finSent) {
       const frame = packet(connection, 0x11);
       connection.seq = (connection.seq + 1) >>> 0;
-      connection.inflight = { end: connection.seq, frame };
+      connection.inflight = inFlight(connection.seq, frame);
       connection.finSent = true;
       return frame;
     }
@@ -105,7 +122,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession 
     return { port: connection.port, host: headers.host || '', method, path,
       body: bytes.slice(headerEnd, headerEnd + length) };
   }
-  return async function onFrame(frame) {
+  async function onFrame(frame) {
     if (!(frame instanceof Uint8Array) || frame.length < 54 || read16(frame, 12) !== 0x0800 ||
       frame[14] >>> 4 !== 4 || frame[23] !== 6 || !equals(frame.subarray(30, 34), serverIp)) return null;
     const ihl = (frame[14] & 15) * 4, total = read16(frame, 16);
@@ -122,18 +139,21 @@ export function createTcpService({ address, mac, onRequest, createSecureSession 
     if (flags & 0x02) {
       if (connections.size >= 64 && !connections.has(key)) return null;
       const connection = { mac: frame.slice(6, 12), clientIp: clientIp.slice(), clientPort, port,
+        lastSeen: Date.now(),
         ack: (clientSeq + 1) >>> 0, seq: (Math.random() * 0xffffffff) >>> 0,
         ipId: 1, inflight: null, request: new Uint8Array(), output: null, queue: [],
         closing: false, position: 0, finSent: false,
         secure: port === 443 ? createSecureSession() : null };
       connections.set(key, connection);
+      if (emitFrame && !retransmitTimer) retransmitTimer = setInterval(tick, 250);
       const reply = packet(connection, 0x12);
       connection.seq = (connection.seq + 1) >>> 0;
-      connection.inflight = { end: connection.seq, frame: reply };
+      connection.inflight = inFlight(connection.seq, reply);
       return reply;
     }
     const connection = connections.get(key);
     if (!connection) return null;
+    connection.lastSeen = Date.now();
     const acknowledged = read32(frame, offset + 8);
     if (connection.inflight && acknowledged === connection.inflight.end) connection.inflight = null;
     const payload = frame.subarray(offset + header, 14 + total);
@@ -176,5 +196,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession 
     const outgoing = next(connection);
     if (outgoing) replies.push(outgoing);
     return replies.length === 0 ? null : replies;
-  };
+  }
+  onFrame.close = () => { connections.clear(); clearInterval(retransmitTimer); retransmitTimer = null; };
+  return onFrame;
 }
