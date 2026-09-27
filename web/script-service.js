@@ -35,6 +35,7 @@ export function createScriptBackend(native) {
   const scripts = new Map();
   let workerSources;
   const subscribers = new Set();
+  let eventSerial = 0;
   const sources = async () => {
     if (!workerSources) workerSources = await import('./dist/script-workers.js');
     return workerSources;
@@ -65,6 +66,16 @@ export function createScriptBackend(native) {
       triggers: record.triggers.map(t => ({ kind: t.kind, callbackId: t.callbackId })),
       mcps: record.mcps, output: record.output.slice(-100) };
   }
+  function dispatch(record, type, payload, blocking = false) {
+    if (!record.running || !record.registered || !record.triggers.some(t => t.kind === type)) return Promise.resolve();
+    const queueEventId = blocking ? ++eventSerial : 0;
+    const completion = blocking ? deferred() : null;
+    if (completion) record.eventAcks.set(queueEventId, completion);
+    record.host.worker.postMessage({ type: 'event', event: type, payload, queueEventId });
+    return completion ? Promise.race([completion.promise, wait(10000, `${type} callback timed out`)]).finally(() => {
+      record.eventAcks.delete(queueEventId);
+    }) : Promise.resolve();
+  }
   async function start({ instanceId, name, code, asyncMode = false, timeoutMs = 3000 }) {
     checkedCode(code);
     if (!scriptName(name)) throw Error('Script name must begin with a letter and contain at most 64 letters, digits, dot, underscore or hyphen');
@@ -76,7 +87,7 @@ export function createScriptBackend(native) {
     const record = {
       instanceId, name, code, asyncMode: !!asyncMode, host, running: true,
       registered: false, started: false, triggers: [], mcps: [], output: [],
-      pending: new Set(), pendingMcp: new Map(), startup, callSerial: 0,
+      pending: new Set(), pendingMcp: new Map(), eventAcks: new Map(), startup, callSerial: 0,
       scriptInstanceId: crypto.randomUUID()
     };
     scripts.set(key(instanceId, name), record);
@@ -85,6 +96,8 @@ export function createScriptBackend(native) {
       record.startup.reject(reason);
       for (const pending of record.pendingMcp.values()) pending.reject(reason);
       record.pendingMcp.clear();
+      for (const pending of record.eventAcks.values()) pending.reject(reason);
+      record.eventAcks.clear();
       record.running = false; scripts.delete(key(instanceId, name)); host.dispose();
     };
     host.worker.onerror = event => fatal(event.message || 'Supervisor crashed');
@@ -117,12 +130,12 @@ export function createScriptBackend(native) {
       } else if (message.type === 'started') {
         if (!record.compiled) { fatal('Script started before compile'); return; }
         record.started = true;
-        host.worker.postMessage({ type: 'event', event: 'start', payload: { instanceId } });
       } else if (message.type === 'registrationComplete') {
         if (!record.started || message.scriptInstanceId !== record.scriptInstanceId) { fatal('Invalid script registration'); return; }
         record.mcps = Array.isArray(message.mcps) ? message.mcps : [];
         record.registered = true;
         record.startup.resolve(summary(record));
+        void dispatch(record, 'start', { instanceId });
       } else if (message.type === 'print') {
         record.output.push(...(message.values || []).map(value => String(value).slice(0, 2048)));
         if (record.output.length > 500) record.output.splice(0, record.output.length - 500);
@@ -133,7 +146,10 @@ export function createScriptBackend(native) {
         if (message.ok) pending.resolve(message.value);
         else pending.reject(Error(String(message.error?.message || 'MCP call failed')));
       } else if (message.type === 'failed') fatal(message.error?.message || message.phase || 'Script failed');
-      else if (message.type === 'eventAck' || message.type === 'eventDone' || message.type === 'sourceIdentity') { /* native callbacks registered separately */ }
+      else if (message.type === 'eventAck') {
+        record.eventAcks.get(message.queueEventId)?.resolve({ instanceId, name, eventId: message.queueEventId });
+      }
+      else if (message.type === 'eventDone' || message.type === 'sourceIdentity') { /* native callbacks registered separately */ }
       else if (message.type === 'eventRelease') fatal('Callback release requires a native breakpoint trap');
       else fatal(`Unknown supervisor message: ${message.type}`);
     };
@@ -157,6 +173,8 @@ export function createScriptBackend(native) {
       record.startup.reject(Error('Script stopped'));
       for (const pending of record.pendingMcp.values()) pending.reject(Error('Script stopped'));
       record.pendingMcp.clear(); record.host.dispose(); scripts.delete(key(instanceId, name));
+      for (const pending of record.eventAcks.values()) pending.reject(Error('Script stopped'));
+      record.eventAcks.clear();
     }
     return summary(record);
   }
@@ -199,16 +217,23 @@ export function createScriptBackend(native) {
   }
   const unsubscribe = native.subscribe(event => {
     if (event.type === 'frame') {
-      for (const record of scripts.values()) if (record.instanceId === event.instanceId && record.registered &&
-        record.triggers.some(t => t.kind === 'tick')) {
-        record.host.worker.postMessage({ type: 'event', event: 'tick', payload: { instanceId: event.instanceId } });
+      for (const record of scripts.values()) if (record.instanceId === event.instanceId) {
+        void dispatch(record, 'tick', { instanceId: event.instanceId });
       }
     }
     for (const listener of subscribers) listener(event);
   });
   return {
     async execute(name, args = {}) {
-      if (!persistentMethods.has(name)) return native.execute(name, args);
+      if (!persistentMethods.has(name)) {
+        const result = await native.execute(name, args);
+        if (name === 'saveState' || name === 'loadState') {
+          const type = name === 'saveState' ? 'stateSave' : 'stateLoad';
+          await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
+            .map(s => dispatch(s, type, { instanceId: args.instanceId, slot: args.slot }, true)));
+        }
+        return result;
+      }
       if (name === 'startPersistentScript') return start(args);
       if (name === 'stopPersistentScript') return stop(args);
       if (name === 'restartPersistentScript') {

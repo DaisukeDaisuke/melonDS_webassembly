@@ -16,11 +16,13 @@
 ## 実施状況
 
 - [x] ソース構造・参照実装・ビルド環境を調査。詳細は `WORK_DETAILS.md`。
-- [x] UI/APIの基盤を追加（実際のバックエンドがない間は操作を拒否する）。
-- [ ] Web用PlatformとWasmエントリーポイントをコンパイルしてエミュレータを実行。
-- [ ] LocalMP/Wi-Fiログをコア送受信境界に接続し通信を確認。
-- [ ] DeSmuME相当のデバッグ機能と永続Worker群を移植。
-- [ ] WebMCP第一級tool、ブラウザ仮想サーバーとDWC互換を実際のネットワーク経路に接続。
+- [x] UI/API基盤、Wasm呼び出しWorker、ブラウザ内の原本Workerソース管理、実データのLocalMP/Wi-Fi記録経路を追加。
+- [x] Web用PlatformとWasmエントリーポイントを追加しCodespaceでリンクまで確認。
+- [ ] ROM実行をブラウザで確認し、16台の同時動作とLocalMPの実通信を確認。
+- [ ] 原本Worker群のブラウザ起動・callback/ブレークポイント連携を検証し機能等価にする。
+- [ ] DeSmuME相当のステップ・ブレークポイント・検索・フリーズ・入力記録等をコアに実装。
+- [ ] Wi-Fi仮想ネットワークのDNS/TCP/HTTP/DWCサービスを実装。現段階はraw Ethernetフレームの送受信注入とロギングまで。
+- [ ] WebMCP第一級toolの未実装操作をすべて接続し、ブラウザ仮想サーバーのDWC互換を検証。
 
 ## UI設計の判断（指定interface-design指針）
 

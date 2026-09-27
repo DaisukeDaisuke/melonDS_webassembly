@@ -12,10 +12,14 @@ const METHODS = Object.freeze({
   destroyInstance: 'instance', status: 'instance', pause: 'instance', resume: 'instance',
   reset: 'instance', step: 'instance', stepOver: 'instance', runUntil: 'instance',
   loadRom: 'instance', loadState: 'instance', saveState: 'instance',
+  exportState: 'instance', importSave: 'instance', exportSave: 'instance',
   getRegisters: 'instance', setRegister: 'instance', readMemory: 'instance',
-  writeMemory: 'instance', disassemble: 'instance', addBreakpoint: 'instance',
+  writeMemory: 'instance', memorySearch: 'instance', memoryFreeze: 'instance',
+  listMemoryFreezes: 'instance', removeMemoryFreeze: 'instance',
+  disassemble: 'instance', addBreakpoint: 'instance',
   removeBreakpoint: 'instance', listBreakpoints: 'instance', input: 'instance',
   screenshot: 'instance', localCommLog: 'instance', wifiLog: 'instance',
+  injectNetworkFrame: 'instance',
   runScript: 'instance', startPersistentScript: 'instance',
   stopPersistentScript: 'instance', restartPersistentScript: 'instance',
   listPersistentScripts: 'instance', callPersistentScriptMcp: 'instance',
@@ -47,6 +51,9 @@ export function createApi(backend) {
     }
     if (name === 'loadRom' || name === 'loadRomMany') {
       if (!(args.file instanceof Blob)) throw new TypeError('file must be a Blob');
+    }
+    if ((name === 'loadState' || name === 'importSave') && args.file !== undefined && !(args.file instanceof Blob)) {
+      throw new TypeError('file must be a Blob');
     }
     const ids = name === 'loadRomMany' ? args.instanceIds :
       METHODS[name] === 'instance' ? [args.instanceId] : [];

@@ -2,6 +2,7 @@
 #include "NDS.h"
 #include "NDSCart.h"
 #include "LocalMP.h"
+#include "virtual-net.h"
 #include <array>
 #include <cstring>
 #include <memory>
@@ -13,6 +14,7 @@ struct Instance {
     int id;
     std::unique_ptr<melonDS::NDS> nds;
     std::vector<melonDS::u8> save;
+    std::array<std::vector<melonDS::u8>, 10> states;
     bool paused = true;
 };
 std::array<std::unique_ptr<Instance>, 16> instances;
@@ -68,6 +70,9 @@ EMSCRIPTEN_KEEPALIVE int web_frame(int id) {
     if (!inst->paused) inst->nds->RunFrame();
     return static_cast<int>(inst->nds->NumFrames);
 }
+EMSCRIPTEN_KEEPALIVE int web_frame_number(int id) {
+    auto* inst = get(id); return inst ? static_cast<int>(inst->nds->NumFrames) : -1;
+}
 EMSCRIPTEN_KEEPALIVE int web_register(int id, int cpu, int reg) {
     auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9) || reg < 0 || reg > 16) return 0;
     auto* arm = cpu == 9 ? static_cast<melonDS::ARM*>(inst->nds->ARM9) : inst->nds->ARM7;
@@ -86,7 +91,8 @@ EMSCRIPTEN_KEEPALIVE int web_read_memory(int id, int cpu, unsigned address, melo
     return length;
 }
 EMSCRIPTEN_KEEPALIVE int web_write_memory(int id, int cpu, unsigned address, const melonDS::u8* in, int length) {
-    auto* inst = get(id); if (!inst || !in || (cpu != 7 && cpu != 9) || length < 0 || length > 4096 || !inst->paused) return -1;
+    // Calls are serialized on the Wasm Worker, including writes between frames.
+    auto* inst = get(id); if (!inst || !in || (cpu != 7 && cpu != 9) || length < 0 || length > 4096) return -1;
     for (int n = 0; n < length; n++) {
         if (cpu == 9) inst->nds->ARM9Write8(address + n, in[n]);
         else inst->nds->ARM7Write8(address + n, in[n]);
@@ -96,6 +102,65 @@ EMSCRIPTEN_KEEPALIVE int web_write_memory(int id, int cpu, unsigned address, con
 EMSCRIPTEN_KEEPALIVE int web_key_mask(int id, unsigned mask) {
     auto* inst = get(id); if (!inst) return -1;
     inst->nds->SetKeyMask(mask); return 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_save_state(int id, int slot) {
+    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10 || !inst->nds->CartInserted()) return -1;
+    melonDS::Savestate file;
+    if (!inst->nds->DoSavestate(&file) || file.Error) return -2;
+    file.Finish();
+    if (file.Error) return -2;
+    const auto* data = static_cast<const melonDS::u8*>(file.Buffer());
+    inst->states[slot].assign(data, data + file.Length());
+    return static_cast<int>(inst->states[slot].size());
+}
+EMSCRIPTEN_KEEPALIVE int web_load_state(int id, int slot) {
+    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10 || inst->states[slot].empty()) return -1;
+    melonDS::Savestate rollback;
+    if (!inst->nds->DoSavestate(&rollback) || rollback.Error) return -2;
+    rollback.Finish();
+    if (rollback.Error) return -2;
+    auto& bytes = inst->states[slot];
+    melonDS::Savestate file(bytes.data(), bytes.size(), false);
+    if (inst->nds->DoSavestate(&file) && !file.Error) return 0;
+    melonDS::Savestate restore(rollback.Buffer(), rollback.Length(), false);
+    inst->nds->DoSavestate(&restore);
+    return -2;
+}
+EMSCRIPTEN_KEEPALIVE int web_state_size(int id, int slot) {
+    auto* inst = get(id); return inst && slot >= 0 && slot < 10 ? static_cast<int>(inst->states[slot].size()) : -1;
+}
+EMSCRIPTEN_KEEPALIVE int web_state_export(int id, int slot, melonDS::u8* dest, int capacity) {
+    auto* inst = get(id); if (!inst || slot < 0 || slot >= 10 || !dest || capacity < 0) return -1;
+    const auto& bytes = inst->states[slot];
+    if (capacity < static_cast<int>(bytes.size())) return -2;
+    std::memcpy(dest, bytes.data(), bytes.size());
+    return bytes.size();
+}
+EMSCRIPTEN_KEEPALIVE int web_state_import(int id, int slot, const melonDS::u8* data, int length) {
+    auto* inst = get(id);
+    if (!inst || slot < 0 || slot >= 10 || !data || length < 8 || length > 64 * 1024 * 1024) return -1;
+    auto previous = std::move(inst->states[slot]);
+    inst->states[slot].assign(data, data + length);
+    const int result = web_load_state(id, slot);
+    if (result < 0) inst->states[slot] = std::move(previous);
+    return result;
+}
+EMSCRIPTEN_KEEPALIVE int web_save_size(int id) {
+    auto* inst = get(id); return inst ? static_cast<int>(inst->nds->GetNDSSaveLength()) : -1;
+}
+EMSCRIPTEN_KEEPALIVE int web_save_export(int id, melonDS::u8* dest, int capacity) {
+    auto* inst = get(id); if (!inst || !dest || capacity < 0) return -1;
+    const auto* data = inst->nds->GetNDSSave();
+    int size = web_save_size(id);
+    if (!data || capacity < size) return -2;
+    std::memcpy(dest, data, size); return size;
+}
+EMSCRIPTEN_KEEPALIVE int web_save_import(int id, const melonDS::u8* data, int length) {
+    auto* inst = get(id);
+    if (!inst || !data || length < 0 || length > 16 * 1024 * 1024 || !inst->nds->CartInserted()) return -1;
+    inst->nds->SetNDSSave(data, length);
+    inst->save.assign(data, data + length);
+    return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_framebuffers(int id, unsigned* addresses) {
     auto* inst = get(id); if (!inst || !addresses) return -1;
@@ -126,6 +191,29 @@ EMSCRIPTEN_KEEPALIVE int web_log_entry(int index, unsigned* meta, melonDS::u8* p
     meta[7] = logDropped;
     std::memcpy(payload, record.Payload.data(), record.Length);
     return record.Length;
+}
+static std::array<melonDS::Platform::WebNetFrame, 512> netLogs;
+static unsigned netLogCount;
+static unsigned netLogDropped;
+EMSCRIPTEN_KEEPALIVE int web_net_enqueue(int id, const melonDS::u8* bytes, int length) {
+    if (!get(id)) return -1;
+    return melonDS::Platform::WebNetEnqueue(id, bytes, length);
+}
+EMSCRIPTEN_KEEPALIVE int web_net_log_count() {
+    netLogCount = melonDS::Platform::WebNetDrain(netLogs.data(), netLogs.size(), &netLogDropped);
+    return netLogCount;
+}
+EMSCRIPTEN_KEEPALIVE int web_net_log_entry(int index, unsigned* meta, melonDS::u8* payload, int capacity) {
+    if (index < 0 || static_cast<unsigned>(index) >= netLogCount || !meta || !payload) return -1;
+    const auto& record = netLogs[index];
+    if (capacity < record.length) return -2;
+    meta[0] = record.timestamp & 0xffffffff;
+    meta[1] = record.timestamp >> 32;
+    meta[2] = record.instanceId;
+    meta[3] = record.received;
+    meta[4] = netLogDropped;
+    memcpy(payload, record.data.data(), record.length);
+    return record.length;
 }
 }
 

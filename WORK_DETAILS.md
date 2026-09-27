@@ -9,10 +9,14 @@
 - `desmume_webassembly-main/src/webmcp.js`: 実装はコマンド一覧/共通call/eval/runScriptをネイティブWebMCPへ登録する設計。そのままコピーするだけでは指示書の「第一級tool」の条件を満たさない。
 - `desmume_webassembly-main/src/workers/` と `src/script-*.js`: eval/persistent用supervisorとWorker、RPC・ポリシーが分割されている。単一の `eval` 呼び出しに置き換えず、移植時はセキュリティ境界とcallbackの意味を維持する。
 - `dq9_micro_dwc_server_emulator.cpp-main/src/`: DNS、RequestHandler、HTTP/SSL周辺が別サービスとして分割。Wi-Fi→NetDriverをブラウザ仮想ネットワークへ接続した後で参照する。
-- Codespace `organic-fishstick-wrjpjx79qjwc5qgr`: `/workspaces/melonDS_webassembly` が存在し、nodeとcmakeは見つかったが`emcc`/`emcmake`はPATHに存在しなかった（2026-09-27）。実ビルドはまだ確認できない。
+- Codespace `organic-fishstick-wrjpjx79qjwc5qgr`: 初期状態では `emcc`/`emcmake` 不在。ユーザー指示を受けCodespace内へ apt-get -y で Emscripten 3.1.6 を導入。melonDS_w submoduleはSSH host key未登録のため、一回限りの `git -c url.https://github.com/.insteadOf=git@github.com:` によるHTTPS URL変換で初期化（Git設定は変更していない）。
 
 ## 現段階の実装と検証方針
 
-- Web側にタイル配置・対象instance・操作を管理する基盤を作り、実コアの代わりとなる疑似実装は置かない。バックエンド未接続は明示的なエラー。APIのPromiseはバックエンドが操作完了を返した後で解決し、インスタンスごとに順序付ける。
-- ロガーは実バックエンドが送信するパケットイベントだけを表示し、テスト用サンプルを実通信として表示しない。
-- ここでのJS単体テストはAPI入力検証・操作直列化・レイアウト復元に限る。エミュレータ、LocalMP、Wi-Fi、DWCを動作確認したことにはならない。
+- `webassembly/build.sh` を唯一のWasmビルド入口にし、GitHub Actions (`ubuntu-26.04`) も同じshを使用する。同期SSHで長いビルドを待たないためCodespace用に `build-async.sh` が `.log` と `.exit` を残す。
+- 最初に `ENABLE_GDBSTUB=OFF` にするとこのforkの `ARM.cpp` が `Gdb::WatchptKind` を未定義のまま使いコンパイル失敗。ONでcoreをコンパイル。続いてリンク時、coreが`-pthread`未指定で作られ shared-memory が拒否されたので core/teakra をともに `-pthread` コンパイルへ修正。その後のWasmリンクは終了コード0。プラットフォーム動作の確認とは区別する。
+- 原本の隔離Worker群と依存ソース一式を `web/sandbox/upstream/` に**フォルダ単位**でコピーした。Actionsは外部アプリのcheckoutを必要としない。Acornハッシュ確認とWorkerのバンドルは同ディレクトリにある参照元のbuild policyを使用。melonDS固有の `web/script-service.js` でRPCとinstanceを接続する。
+- `webassembly/port.cpp` が16個の `NDS` と同一 `LocalMP` を保持し、Platformコールバックのuserdataで混線を防止。Wasm Workerは実処理完了を受けてPromiseを解決する。リセット/ROM/Save/State/レジスタ/メモリはコア経路へ。ステップ、breakpoint等は未対応なら明示エラー。
+- LocalMPは固定長ringへ実際の送受信raw bytesをコピーし取りこぼしを記録。Wi-Fiは `Platform::Net_SendPacket` と `Net_RecvPacket` 境界でraw Ethernetを観測し、ブラウザの仮想サーバーが返すraw frameを受信queueへ注入する。DNS/DWC等のプロトコルサービスはまだない。
+- WebMCPは主要名前ごとのtoolを登録し、AIへの結果はこのリポジトリへ取り込んだ元の `compact-output.js` の境界付きフラットテキストを利用。JSON本文の返却はしない。
+- JS単体チェックはユーザーが「テストするな」と指示する前に4件成功済み。以降のテストは行っていない。Wasm実機起動・ROM/通信・sandboxブラウザ動作は未検証。

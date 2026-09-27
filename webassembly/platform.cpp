@@ -1,8 +1,11 @@
 #include "Platform.h"
 #include "LocalMP.h"
+#include "virtual-net.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
+#include <array>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -13,6 +16,31 @@
 namespace melonDS::Platform {
 void saveNDSToInstance(const u8*, u32, void*);
 LocalMP& localMultiplayer();
+static std::mutex netLock;
+static std::array<std::deque<WebNetFrame>, 16> netPending;
+static std::deque<WebNetFrame> netEvents;
+static u32 netDropped = 0;
+int WebNetEnqueue(int instanceId, const u8* data, int length) {
+    if (instanceId < 0 || instanceId >= 16 || !data || length < 14 || length > 2048) return -1;
+    std::lock_guard<std::mutex> lock(netLock);
+    if (netPending[instanceId].size() >= 256) return -2;
+    WebNetFrame frame {GetUSCount(), instanceId, length, true, {}};
+    memcpy(frame.data.data(), data, length);
+    netPending[instanceId].push_back(frame);
+    return length;
+}
+int WebNetDrain(WebNetFrame* out, int capacity, u32* dropped) {
+    if (!out || capacity < 0) return -1;
+    std::lock_guard<std::mutex> lock(netLock);
+    if (dropped) { *dropped = netDropped; netDropped = 0; }
+    int count = std::min(capacity, static_cast<int>(netEvents.size()));
+    for (int i = 0; i < count; i++) { out[i] = netEvents.front(); netEvents.pop_front(); }
+    return count;
+}
+static void recordNet(const WebNetFrame& frame) {
+    if (netEvents.size() >= 512) { netEvents.pop_front(); ++netDropped; }
+    netEvents.push_back(frame);
+}
 struct FileHandle { FILE* stream; };
 struct Thread { std::thread worker; };
 struct Mutex { std::mutex lock; };
@@ -102,8 +130,26 @@ int MP_SendReply(u8* data, int len, u64 timestamp, u16 aid, void* userdata) { re
 int MP_SendAck(u8* data, int len, u64 timestamp, void* userdata) { return localMultiplayer().SendAck(id(userdata), data, len, timestamp); }
 int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata) { return localMultiplayer().RecvHostPacket(id(userdata), data, timestamp); }
 u16 MP_RecvReplies(u8* data, u64 timestamp, u16 mask, void* userdata) { return localMultiplayer().RecvReplies(id(userdata), data, timestamp, mask); }
-int Net_SendPacket(u8*, int, void*) { return 0; } // No virtual network until a real NetDriver is installed.
-int Net_RecvPacket(u8*, void*) { return 0; }
+int Net_SendPacket(u8* data, int len, void* userdata) {
+    const int instance = id(userdata);
+    if (instance < 0 || instance >= 16 || !data || len < 14 || len > 2048) return 0;
+    WebNetFrame frame {GetUSCount(), instance, len, false, {}};
+    memcpy(frame.data.data(), data, len);
+    std::lock_guard<std::mutex> lock(netLock);
+    recordNet(frame);
+    return 0; // melonDS platform convention: zero means submitted.
+}
+int Net_RecvPacket(u8* data, void* userdata) {
+    const int instance = id(userdata);
+    if (instance < 0 || instance >= 16 || !data) return 0;
+    std::lock_guard<std::mutex> lock(netLock);
+    auto& pending = netPending[instance];
+    if (pending.empty()) return 0;
+    WebNetFrame frame = std::move(pending.front()); pending.pop_front();
+    memcpy(data, frame.data.data(), frame.length);
+    recordNet(frame);
+    return frame.length;
+}
 void Camera_Start(int, void*) {}
 void Camera_Stop(int, void*) {}
 void Camera_CaptureFrame(int, u32* frame, int width, int height, bool, void*) { std::fill(frame, frame + width * height, 0); }

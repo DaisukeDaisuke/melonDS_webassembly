@@ -3,6 +3,7 @@ import { createWasmBackend } from './backend.js';
 import { createScriptBackend } from './script-service.js';
 import { loadLayout, saveLayout, makeTile, TILE_TYPES, LABELS } from './layout.js';
 import { registerWebMcp } from './webmcp.js';
+import { createVirtualNetwork } from './virtual-network.js';
 
 const $ = selector => document.querySelector(selector);
 const workspace = $('#workspace');
@@ -11,6 +12,7 @@ const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
 globalThis.melonds = api;
+globalThis.melondsVirtualNetwork = createVirtualNetwork(api);
 
 function errorMessage(error) {
   $('#notice').textContent = error?.message || String(error);
@@ -60,6 +62,12 @@ function bytes(input) {
   const value = input.value.replace(/\s+/g, '');
   if (!value || value.length % 2 || !/^[0-9a-f]+$/i.test(value)) throw Error('偶数桁のhexデータを入力してください');
   return Uint8Array.from(value.match(/.{2}/g), n => Number.parseInt(n, 16));
+}
+function download(data, name, type = 'application/octet-stream') {
+  const url = URL.createObjectURL(new Blob([data], { type }));
+  const link = document.createElement('a');
+  link.href = url; link.download = name; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
 function populateInstances(select, chosen) {
@@ -153,6 +161,9 @@ function renderBody(body, tile, tileElement) {
     act('読み取り', () => api.readMemory(args({ address: hex(address), length: Number(length.value) })));
     const content = textInput(controls, '書き込みhex');
     act('書き込み', () => api.writeMemory(args({ address: hex(address), data: bytes(content) })));
+    act('検索', () => api.memorySearch(args({ address: hex(address), length: Number(length.value), pattern: bytes(content) })));
+    act('固定', () => api.memoryFreeze(args({ address: hex(address), data: bytes(content) })));
+    act('固定解除', () => api.removeMemoryFreeze(args({ address: hex(address) })));
   } else if (tile.type === 'registers') {
     act('レジスタ取得', () => api.getRegisters(args()));
     const name = textInput(controls, 'レジスタ名', 'r0');
@@ -168,16 +179,60 @@ function renderBody(body, tile, tileElement) {
     act('一覧', () => api.listBreakpoints(args()));
   } else if (tile.type === 'input') {
     for (const key of ['A', 'B', 'X', 'Y', 'L', 'R', 'START', 'SELECT', 'UP', 'DOWN', 'LEFT', 'RIGHT']) {
-      const item = button(key, () => api.input(args({ key, pressed: true })));
-      item.addEventListener('pointerup', () => void apply(null, () => api.input(args({ key, pressed: false }))));
-      item.addEventListener('pointercancel', () => void apply(null, () => api.input(args({ key, pressed: false }))));
+      const item = el('button', '', key); item.type = 'button';
+      let pressed = false;
+      const set = active => {
+        if (pressed === active) return;
+        pressed = active; item.setAttribute('aria-pressed', String(active));
+        void apply(null, () => api.input(args({ key, pressed: active })));
+      };
+      item.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        item.setPointerCapture(event.pointerId); set(true);
+      });
+      item.addEventListener('pointerup', () => set(false));
+      item.addEventListener('pointercancel', () => set(false));
+      item.addEventListener('keydown', event => {
+        if (event.key !== ' ' && event.key !== 'Enter') return;
+        event.preventDefault(); set(true);
+      });
+      item.addEventListener('keyup', event => {
+        if (event.key !== ' ' && event.key !== 'Enter') return;
+        event.preventDefault(); set(false);
+      });
+      item.addEventListener('blur', () => set(false));
       controls.append(item);
     }
   } else if (tile.type === 'state') {
     const slot = textInput(controls, 'スロット (0-9)', '0');
     act('ステート保存', () => api.saveState(args({ slot: Number(slot.value) })));
     act('ステート読込', () => api.loadState(args({ slot: Number(slot.value) })));
-    act('スクリーンショット', () => api.screenshot(args()));
+    controls.append(button('ステートを書き出す', async () => {
+      const data = await api.exportState(args({ slot: Number(slot.value) }));
+      download(new Uint8Array(data), `instance-${tile.instanceId}-slot-${slot.value}.ml`);
+    }));
+    controls.append(button('Saveを書き出す', async () => {
+      const data = await api.exportSave(args());
+      download(new Uint8Array(data), `instance-${tile.instanceId}.sav`);
+    }));
+    const stateInput = el('input'); stateInput.type = 'file'; stateInput.accept = '.ml,.sav';
+    stateInput.setAttribute('aria-label', 'State または Save をインポート');
+    stateInput.onchange = () => void apply(null, async () => {
+      const file = stateInput.files?.[0]; if (!file) return;
+      if (file.name.toLowerCase().endsWith('.sav')) await api.importSave(args({ file }));
+      else await api.loadState(args({ slot: Number(slot.value), file }));
+    }).finally(() => { stateInput.value = ''; });
+    body.insertBefore(stateInput, output);
+    controls.append(button('スクリーンショット', async () => {
+      const frame = await api.screenshot(args());
+      const canvas = document.createElement('canvas'); canvas.width = frame.width; canvas.height = frame.height * 2;
+      const context = canvas.getContext('2d');
+      context.putImageData(new ImageData(new Uint8ClampedArray(frame.top), frame.width, frame.height), 0, 0);
+      context.putImageData(new ImageData(new Uint8ClampedArray(frame.bottom), frame.width, frame.height), 0, frame.height);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve));
+      if (!blob) throw Error('Screenshot encoding failed');
+      download(blob, `instance-${tile.instanceId}.png`, 'image/png');
+    }));
   } else if (tile.type === 'script') {
     const code = el('textarea'); code.rows = 5; code.placeholder = 'await mcp.call("status", { instanceId: 0 })';
     code.value = tile.settings.code || '';
