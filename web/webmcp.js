@@ -25,6 +25,7 @@ const toolInputs = {
   saveStateToBrowser: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],
   loadStateFromBrowser: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],
   input: [{ key: { type: 'string' }, pressed: { type: 'boolean' } }, ['key', 'pressed']],
+  touch: [{ x: { type: 'integer', minimum: 0, maximum: 255 }, y: { type: 'integer', minimum: 0, maximum: 191 }, pressed: { type: 'boolean' } }, ['x', 'y', 'pressed']],
   inputSequence: [{ events: { type: 'array', items: { type: 'object', properties: { frame: uint, mask: uint }, required: ['frame', 'mask'] } } }, ['events']],
   waitFrames: [{ frames: { type: 'integer', minimum: 1 }, timeoutMs: uint }, ['frames']],
   waitMemory: [{ address: uint, cpu, pattern: bytes, timeoutMs: uint }, ['address', 'pattern']],

@@ -11,7 +11,7 @@ const workspace = $('#workspace');
 const layout = loadLayout();
 const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
-const state = { instances: [], logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
+const state = { instances: [], names: new Map(), logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
 const audio = { context: null, next: Array(16).fill(0) };
 globalThis.melonds = api;
 globalThis.melondsVirtualNetwork = createVirtualNetwork(api);
@@ -75,7 +75,7 @@ function button(text, callback) {
   return item;
 }
 function row(parent) { const item = el('div', 'control-row'); parent.append(item); return item; }
-function readout(parent, initial = 'Wasmバックエンド接続後にデータを取得できます。') {
+function readout(parent, initial = '—') {
   const item = el('pre', 'readout', initial); parent.append(item); return item;
 }
 function textInput(parent, placeholder, defaultValue = '') {
@@ -102,13 +102,13 @@ function download(data, name, type = 'application/octet-stream') {
 function populateInstances(select, chosen) {
   select.replaceChildren();
   for (let id = 0; id < MAX_INSTANCES; id++) {
-    const option = new Option(`Instance ${String(id).padStart(2, '0')}${state.instances.includes(id) ? ' ●' : ''}`, id);
+    const option = new Option(`#${String(id).padStart(2, '0')}${state.instances.includes(id) ? '' : ' · 未作成'}`, id);
     select.append(option);
   }
   select.value = String(chosen);
 }
 function refreshSummary() {
-  $('#session-summary').textContent = `インスタンス ${state.instances.length} / 16 · タイル ${layout.tiles.length}`;
+  $('#session-summary').textContent = `${state.instances.length} / 16 台 · ${layout.tiles.length} ツール`;
   populateInstances($('#rom-instance'), Number($('#rom-instance').value) || 0);
   for (const tile of workspace.querySelectorAll('.tile')) {
     const model = layout.tiles.find(t => t.id === tile.dataset.id);
@@ -117,7 +117,7 @@ function refreshSummary() {
 }
 function addTile(type, x, y) {
   const top = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1;
-  const tile = makeTile(type, { x: Math.max(0, x), y: Math.max(0, y), z: top });
+  const tile = makeTile(type, { x: Math.max(0, x), y: Math.max(0, y), z: top, instanceId: Number($('#rom-instance').value) || 0 });
   layout.tiles.push(tile); save(); renderTile(tile); refreshSummary(); updateScreenTargets(); updateAudioTargets();
 }
 function renderLog(body, tile) {
@@ -129,7 +129,10 @@ function renderLog(body, tile) {
   const pauseLabel = el('label', '', ' 表示を停止'); pauseLabel.prepend(pause); controls.append(pauseLabel);
   controls.append(button('消去', () => { state.logs[tile.type] = []; update(); }));
   if (tile.type === 'wifi-log') {
-    controls.append(button('仮想ネットワーク接続', () => api.setNetworkBackend({ instanceId: tile.instanceId, backend: 'virtual' })));
+    controls.append(button('DQ9 WFC 接続', async () => {
+      await globalThis.melondsVirtualNetwork.registerDq9WfcFromSameOrigin({ instanceId: tile.instanceId });
+      await api.setNetworkBackend({ instanceId: tile.instanceId, backend: 'virtual' });
+    }));
     controls.append(button('ネットワーク切断', () => api.setNetworkBackend({ instanceId: tile.instanceId, backend: 'disabled' })));
   }
   const table = el('table', 'packet-table');
@@ -156,7 +159,11 @@ function renderLog(body, tile) {
   showAll.onchange = () => { tile.settings.all = showAll.checked; save(); update(); };
   pause.onchange = () => { tile.settings.paused = pause.checked; save(); update(); };
   body.addEventListener('target-change', update);
-  body.addEventListener('packet', update);
+  let repaint = 0;
+  body.addEventListener('packet', () => {
+    if (repaint) return;
+    repaint = setTimeout(() => { repaint = 0; if (body.isConnected) update(); }, 100);
+  });
   update();
 }
 
@@ -167,32 +174,92 @@ function renderBody(body, tile, tileElement) {
   });
   if (tile.type === 'screen') {
     const stack = el('div', 'screens');
+    stack.tabIndex = 0;
+    stack.setAttribute('aria-label', 'ゲーム画面。方向キー、X=A、Z=B、S=X、A=Y、Q=L、W=R、Enter=START、Shift=SELECT');
+    stack.title = '方向キー / X:A Z:B S:X A:Y Q:L W:R Enter:START Shift:SELECT';
     const top = el('canvas'); const bottom = el('canvas');
     top.width = bottom.width = 256; top.height = bottom.height = 192;
     top.setAttribute('aria-label', '上画面'); bottom.setAttribute('aria-label', '下画面');
-    const toggleAudio = button('▶ 音声開始', async () => {
+    const toolbar = el('div', 'screen-toolbar');
+    toolbar.append(button('再開', () => api.resume(args())), button('停止', () => api.pause(args())));
+    const rom = el('input'); rom.type = 'file'; rom.accept = '.nds,.srl'; rom.hidden = true;
+    rom.setAttribute('aria-label', `インスタンス${tile.instanceId}のROM`);
+    rom.onchange = () => void apply(null, async () => {
+      const file = rom.files?.[0]; if (!file) return;
+      await ensureInstance(tile.instanceId);
+      await api.loadRom({ instanceId: tile.instanceId, file });
+      state.names.set(tile.instanceId, file.name); filename.textContent = file.name;
+    }).finally(() => { rom.value = ''; });
+    toolbar.append(button('ROM', () => rom.click()), rom);
+    const frameLabel = el('span', 'screen-state', '—'); toolbar.append(frameLabel);
+    const footer = el('div', 'screen-footer');
+    const filename = el('span', '', state.names.get(tile.instanceId) || 'ROM未読込');
+    const toggleAudio = button('音声 OFF', async () => {
       if (!audio.context) audio.context = new AudioContext({ sampleRate: 48000 });
       await audio.context.resume();
       tileElement._audioActive = !tileElement._audioActive;
-      toggleAudio.textContent = tileElement._audioActive ? '■ 音声停止' : '▶ 音声開始';
+      toggleAudio.textContent = tileElement._audioActive ? '音声 ON' : '音声 OFF';
+      toggleAudio.setAttribute('aria-pressed', String(tileElement._audioActive));
       updateAudioTargets();
     });
-    stack.append(top, bottom, el('p', 'screen-hint', '256 × 192 / 2 DISPLAYS'), toggleAudio);
-    body.append(stack);
+    footer.append(filename, toggleAudio);
+    stack.append(top, bottom);
+    body.append(toolbar, stack, footer);
+    const held = new Set();
+    const keymap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', KeyX: 'A', KeyZ: 'B', KeyS: 'X', KeyA: 'Y', KeyQ: 'L', KeyW: 'R', Enter: 'START', ShiftLeft: 'SELECT', ShiftRight: 'SELECT' };
+    stack.addEventListener('keydown', event => {
+      const key = keymap[event.code]; if (!key) return;
+      event.preventDefault(); if (held.has(key)) return;
+      held.add(key); void apply(null, () => api.input(args({ key, pressed: true })));
+    });
+    stack.addEventListener('keyup', event => {
+      const key = keymap[event.code]; if (!key) return;
+      event.preventDefault(); held.delete(key); void apply(null, () => api.input(args({ key, pressed: false })));
+    });
+    let touchPointer = null, touchedInstance = null;
+    const release = () => {
+      for (const key of held) void api.input(args({ key, pressed: false })).catch(() => {});
+      held.clear();
+      if (touchedInstance !== null) void api.touch({ instanceId: touchedInstance, x: 0, y: 0, pressed: false }).catch(() => {});
+      touchPointer = null; touchedInstance = null;
+    };
+    tileElement._releaseInput = release;
+    stack.addEventListener('blur', release);
+    const touch = event => {
+      const rect = bottom.getBoundingClientRect();
+      void apply(null, () => api.touch({ instanceId: touchedInstance,
+        x: Math.max(0, Math.min(255, Math.floor((event.clientX - rect.left) * 256 / rect.width))),
+        y: Math.max(0, Math.min(191, Math.floor((event.clientY - rect.top) * 192 / rect.height))), pressed: true }));
+    };
+    bottom.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || touchPointer !== null) return;
+      stack.focus(); bottom.setPointerCapture(event.pointerId);
+      touchPointer = event.pointerId; touchedInstance = tile.instanceId; touch(event);
+    });
+    bottom.addEventListener('pointermove', event => { if (event.pointerId === touchPointer) touch(event); });
+    bottom.addEventListener('pointerup', release); bottom.addEventListener('pointercancel', release);
     const draw = event => {
       if (event.type !== 'frame' || event.instanceId !== tile.instanceId) return;
+      if (event.frame !== undefined) frameLabel.textContent = `${event.frame} f`;
+      filename.textContent = state.names.get(tile.instanceId) || 'ROM未読込';
       for (const [canvas, pixels] of [[top, event.top], [bottom, event.bottom]]) {
         if (!pixels || pixels.length !== 256 * 192 * 4) continue;
         canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(pixels), 256, 192), 0, 0);
       }
     };
     tileElement._frameListener = draw;
+    body.addEventListener('target-change', () => {
+      for (const canvas of [top, bottom]) canvas.getContext('2d').clearRect(0, 0, 256, 192);
+      frameLabel.textContent = '—'; filename.textContent = state.names.get(tile.instanceId) || 'ROM未読込';
+      if (state.instances.includes(tile.instanceId)) void api.screenshot(args()).then(frame => draw({ ...frame, type: 'frame', instanceId: tile.instanceId })).catch(() => {});
+    });
     return;
   }
   if (tile.type === 'local-log' || tile.type === 'wifi-log') return renderLog(body, tile);
   const controls = row(body);
   const output = readout(body);
   const act = (label, fn) => controls.append(button(label, async () => { output.textContent = fmt(await fn()); }));
+  body.addEventListener('target-change', () => { output.textContent = '—'; });
   if (tile.type === 'debugger') {
     tileElement._debugListener = event => { if (event.instanceId === tile.instanceId) output.textContent = fmt(event); };
     act('一時停止', () => api.pause(args())); act('再開', () => api.resume(args()));
@@ -215,10 +282,20 @@ function renderBody(body, tile, tileElement) {
     act('固定解除', () => api.removeMemoryFreeze(args({ address: hex(address) })));
     act('値を待つ', () => api.waitMemory(args({ address: hex(address), pattern: bytes(content) })));
   } else if (tile.type === 'registers') {
-    act('レジスタ取得', () => api.getRegisters(args()));
+    const showRegisters = async () => {
+      const registers = await api.getRegisters(args());
+      output.className = 'register-grid'; output.replaceChildren();
+      for (const [name, value] of Object.entries(registers)) {
+        const item = el('div', 'register-cell');
+        item.append(el('span', '', name.toUpperCase()), el('strong', '', (value >>> 0).toString(16).padStart(8, '0')));
+        output.append(item);
+      }
+    };
+    controls.append(button('更新', showRegisters));
+    tileElement._debugListener = event => { if (event.instanceId === tile.instanceId) void showRegisters().catch(errorMessage); };
     const name = textInput(controls, 'レジスタ名', 'r0');
     const value = textInput(controls, '値 (hex)', '0');
-    act('設定', () => api.setRegister(args({ register: name.value, value: hex(value) })));
+    controls.append(button('設定', async () => { await api.setRegister(args({ register: name.value, value: hex(value) })); await showRegisters(); }));
   } else if (tile.type === 'disassembly') {
     const address = textInput(controls, '開始アドレス (hex)', '02000000');
     act('逆アセンブル', () => api.disassemble(args({ address: hex(address), count: 16 })));
@@ -282,12 +359,13 @@ function renderBody(body, tile, tileElement) {
       const data = await api.exportSave(args());
       download(new Uint8Array(data), `instance-${tile.instanceId}.sav`);
     }));
-    const stateInput = el('input'); stateInput.type = 'file'; stateInput.accept = '.ml,.sav';
+    const stateInput = el('input'); stateInput.type = 'file'; stateInput.accept = '.ml,.ml0,.ml1,.ml2,.ml3,.ml4,.ml5,.ml6,.ml7,.ml8,.ml9,.dst,.sav,.dsv';
     stateInput.setAttribute('aria-label', 'State または Save をインポート');
     stateInput.onchange = () => void apply(null, async () => {
       const file = stateInput.files?.[0]; if (!file) return;
-      if (file.name.toLowerCase().endsWith('.sav')) await api.importSave(args({ file }));
+      if (/\.(sav|dsv)$/i.test(file.name)) { await api.importSave(args({ file })); await api.reset(args()); }
       else await api.loadState(args({ slot: Number(slot.value), file }));
+      output.textContent = `${file.name} · 読込済み`;
     }).finally(() => { stateInput.value = ''; });
     body.insertBefore(stateInput, output);
     controls.append(button('スクリーンショット', async () => {
@@ -307,7 +385,7 @@ function renderBody(body, tile, tileElement) {
     code.value = tile.settings.code || '';
     code.addEventListener('input', () => { tile.settings.code = code.value; save(); });
     body.insertBefore(code, output);
-    act('隔離Workerで実行', () => api.runScript(args({ code: code.value })));
+    act('実行', () => api.runScript(args({ code: code.value })));
   } else if (tile.type === 'persistent-scripts') {
     const name = textInput(controls, 'スクリプト名');
     const code = el('textarea'); code.rows = 5; code.placeholder = 'emu_ontick(async () => { /* ... */ });';
@@ -332,18 +410,20 @@ function renderTile(tile) {
   }
   const select = node.querySelector('.instance-select'); populateInstances(select, tile.instanceId);
   select.onchange = () => {
+    node._releaseInput?.();
     tile.instanceId = Number(select.value); node.querySelector('.tile-id').textContent = `#${select.value.padStart(2, '0')}`;
     save(); updateScreenTargets(); updateAudioTargets(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change'));
   };
   const cpu = node.querySelector('.cpu-select'); cpu.value = tile.cpu;
-  cpu.onchange = () => { tile.cpu = cpu.value; save(); };
+  cpu.onchange = () => { tile.cpu = cpu.value; save(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change')); };
   if (['screen', 'local-log', 'wifi-log', 'input', 'state', 'script', 'persistent-scripts'].includes(tile.type)) node.querySelector('.cpu-label').hidden = true;
   const min = node.querySelector('.tile-minimize');
   min.onclick = () => { tile.minimized = !tile.minimized; node.classList.toggle('minimized', tile.minimized); min.setAttribute('aria-label', tile.minimized ? '展開' : '最小化'); save(); updateScreenTargets(); };
   node.classList.toggle('minimized', tile.minimized);
-  node.querySelector('.tile-close').onclick = () => { layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); updateScreenTargets(); updateAudioTargets(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
+  node.querySelector('.tile-close').onclick = () => { node._releaseInput?.(); node._resizeObserver?.disconnect(); layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); updateScreenTargets(); updateAudioTargets(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
   node.style.zIndex = tile.z;
   if (layout.mode === 'free') place(node, tile);
+  else if (tile.gridHeight) node.style.height = `${tile.gridHeight}px`;
   node.addEventListener('pointerdown', () => { tile.z = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1; node.style.zIndex = tile.z; save(); });
   node.querySelector('.tile-header').addEventListener('pointerdown', event => {
     if (layout.mode !== 'free' || event.button !== 0 || event.target.closest('button')) return;
@@ -353,13 +433,18 @@ function renderTile(tile) {
     const end = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end); save(); };
     handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
   });
-  new ResizeObserver(() => {
-    if (layout.mode !== 'free' || !node.isConnected || tile.minimized) return;
+  node._resizeObserver = new ResizeObserver(() => {
+    if (!node.isConnected || tile.minimized) return;
     const rect = node.getBoundingClientRect();
+    if (layout.mode !== 'free') {
+      if (tile.gridHeight !== Math.round(rect.height)) { tile.gridHeight = Math.round(rect.height); save(); }
+      return;
+    }
     if (Math.abs(rect.width - tile.width) > 1 || Math.abs(rect.height - tile.height) > 1) {
       tile.width = rect.width; tile.height = rect.height; save();
     }
-  }).observe(node);
+  });
+  node._resizeObserver.observe(node);
   renderBody(node.querySelector('.tile-body'), tile, node);
   workspace.append(node);
 }
@@ -368,6 +453,7 @@ function place(node, tile) {
   node.style.width = `${tile.width}px`; node.style.height = `${tile.height}px`;
 }
 function renderLayout() {
+  for (const node of workspace.querySelectorAll('.tile')) { node._releaseInput?.(); node._resizeObserver?.disconnect(); }
   workspace.replaceChildren();
   workspace.className = `workspace ${layout.mode}`;
   for (const tile of layout.tiles) renderTile(tile);
@@ -394,28 +480,57 @@ workspace.ondrop = event => {
   addTile(type, event.clientX - rect.left + workspace.scrollLeft, event.clientY - rect.top + workspace.scrollTop);
 };
 for (const mode of ['grid', 'free']) $(`#${mode}-mode`).onclick = () => { layout.mode = mode; save(); renderLayout(); };
+async function ensureInstance(id) {
+  if (state.instances.includes(id)) return id;
+  await api.createInstance({ instanceId: id });
+  if (!state.instances.includes(id)) state.instances.push(id);
+  refreshSummary(); return id;
+}
 $('#create-instance').onclick = event => apply(event.currentTarget, async () => {
   const result = await api.createInstance({});
   const id = typeof result === 'number' ? result : result?.instanceId;
   if (!Number.isInteger(id) || id < 0 || id >= 16) throw Error('バックエンドが有効なinstanceIdを返しませんでした');
   if (!state.instances.includes(id)) state.instances.push(id);
   refreshSummary();
+  $('#rom-instance').value = String(id);
+  if (!layout.tiles.some(tile => tile.type === 'screen' && tile.instanceId === id)) addTile('screen', 16 + id * 24, 16 + id * 24);
 });
+$('#open-rom').onclick = () => $('#rom-file').click();
+$('#rom-target').onchange = () => { $('#instance-count-label').hidden = $('#rom-target').value !== 'all'; };
+$('#rom-target').onchange();
 $('#rom-file').onchange = event => {
   const input = event.currentTarget, file = input.files?.[0];
   if (!file) return;
   void apply(null, async () => {
     if ($('#rom-target').value === 'all') {
-      if (!state.instances.length) throw Error('先にインスタンスを作成してください');
+      const count = Number($('#instance-count').value);
+      if (!Number.isInteger(count) || count < 1 || count > MAX_INSTANCES) throw Error('台数は1〜16で指定してください');
+      for (let id = 0; state.instances.length < count && id < MAX_INSTANCES; id++) await ensureInstance(id);
       await api.loadRomMany({ instanceIds: [...state.instances], file });
-    } else await api.loadRom({ instanceId: Number($('#rom-instance').value), file });
+      for (const id of state.instances) state.names.set(id, file.name);
+    } else {
+      const id = Number($('#rom-instance').value);
+      await ensureInstance(id);
+      await api.loadRom({ instanceId: id, file });
+      state.names.set(id, file.name);
+    }
+    refreshSummary();
   }).finally(() => { input.value = ''; });
 };
 api.subscribe(event => {
   if (!event || typeof event !== 'object') return;
+  if (event.type === 'instance-change') {
+    if (event.action === 'destroyInstance') {
+      state.instances = state.instances.filter(id => id !== event.instanceId); state.names.delete(event.instanceId);
+      globalThis.melondsVirtualNetwork.unregister({ instanceId: event.instanceId });
+    } else if (event.action === 'createInstance' && !state.instances.includes(event.instanceId)) state.instances.push(event.instanceId);
+    if (event.romName) state.names.set(event.instanceId, event.romName);
+    refreshSummary();
+    return;
+  }
   if (event.type === 'audio') { playAudio(event); return; }
   if (event.type === 'breakpoint' || event.type === 'debug-stop') {
-    for (const tile of workspace.querySelectorAll('[data-type=debugger]')) tile._debugListener?.(event);
+    for (const tile of workspace.querySelectorAll('.tile')) tile._debugListener?.(event);
     return;
   }
   if (event.type === 'frame') {
@@ -430,8 +545,11 @@ api.subscribe(event => {
 renderLayout();
   void apply(null, async () => {
     const list = await api.listInstances();
-    $('#backend-status').textContent = 'Wasm 接続済み';
+    $('#backend-status').textContent = '接続済み';
+    $('#backend-status').dataset.ready = 'true';
     state.instances = list.map(value => typeof value === 'number' ? value : value.instanceId);
+    if (!state.instances.length) await ensureInstance(0);
     refreshSummary();
   });
 void registerWebMcp(api).catch(errorMessage);
+window.addEventListener('blur', () => { for (const node of workspace.querySelectorAll('.tile')) node._releaseInput?.(); });

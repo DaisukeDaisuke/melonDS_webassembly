@@ -1,5 +1,5 @@
 #pragma once
-#include "types.h"
+#include "../melonDS_w/src/types.h"
 
 namespace melonDS {
 class ARM;

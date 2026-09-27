@@ -1,7 +1,11 @@
 // A worker owns all calls to the Wasm core. A reply means the native call has
 // returned; request acceptance alone never completes a destructive API call.
 export function createWasmBackend() {
-  const worker = new Worker(new URL('./engine.worker.js', import.meta.url), { type: 'module' });
+  const moduleURL = new URL('./main.js', import.meta.url).href;
+  const workerURL = URL.createObjectURL(new Blob([
+    `import { startEngine } from ${JSON.stringify(moduleURL)}; await startEngine(${JSON.stringify(moduleURL)});`
+  ], { type: 'text/javascript' }));
+  const worker = new Worker(workerURL, { type: 'module', name: 'melonDS dispatcher' });
   const listeners = new Set();
   const pending = new Map();
   let serial = 0;
@@ -10,7 +14,7 @@ export function createWasmBackend() {
   let readyResolve, readyReject;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   worker.onmessage = ({ data }) => {
-    if (data.type === 'ready') { settled = true; readyResolve(); return; }
+    if (data.type === 'ready') { URL.revokeObjectURL(workerURL); settled = true; readyResolve(); return; }
     if (data.type === 'event') { for (const listener of listeners) listener(data.event); return; }
     const entry = pending.get(data.id);
     if (!entry) return;
@@ -19,6 +23,7 @@ export function createWasmBackend() {
     else entry.resolve(data.result);
   };
   const fail = error => {
+    URL.revokeObjectURL(workerURL);
     const reason = new Error(error?.message || 'Wasm worker failed to initialize');
     fatalError = reason;
     if (!settled) { settled = true; readyReject(reason); }

@@ -444,6 +444,10 @@ export function createScriptBackend(native) {
         }
         const hash = ['loadRom', 'loadRomMany'].includes(name) ? await romHash(args.file) : null;
         const result = await native.execute(name, args);
+        if (['createInstance', 'destroyInstance', 'loadRom', 'loadRomMany'].includes(name)) {
+          const ids = name === 'loadRomMany' ? args.instanceIds : [name === 'createInstance' ? result.instanceId : args.instanceId];
+          for (const instanceId of ids) for (const listener of subscribers) listener({ type: 'instance-change', action: name, instanceId, romName: args.file?.name });
+        }
         if (name === 'destroyInstance') romHashes.delete(args.instanceId);
         if (name === 'loadRom') romHashes.set(args.instanceId, hash);
         if (name === 'loadRomMany') for (const id of args.instanceIds) romHashes.set(id, hash);

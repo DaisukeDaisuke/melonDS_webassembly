@@ -3,49 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>melonDS · Workbench</title>
+  <meta name="theme-color" content="#f5f6f8">
+  <title>melonDS</title>
   <link rel="stylesheet" href="./style.css">
-  <script src="./coi-serviceworker.js"></script>
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">▦</span><div><strong>melonDS</strong><span>WORKBENCH / MULTIPLAYER LAB</span></div></div>
-      <div class="top-actions">
-        <span id="backend-status" class="backend-status" role="status">Wasm 未接続</span>
-        <button id="create-instance" type="button">＋ インスタンス</button>
-        <label class="button primary" for="rom-file">ROMを読み込む</label>
-        <input id="rom-file" type="file" accept=".nds,.srl" hidden>
-      </div>
-    </header>
-    <div class="workspace-shell">
-      <aside class="palette" aria-label="ツールパレット">
-        <div class="palette-head"><span class="eyebrow">TOOLS / 01—13</span><h1>ツールを配置</h1><p>必要な計測器だけを作業空間へ。クリックまたはドラッグして追加できます。</p></div>
-        <div id="palette-tools" class="palette-tools"></div>
-        <div class="palette-foot"><span class="status-dot"></span>各タイルで対象を選択</div>
-      </aside>
-      <main class="main-area">
-        <div class="workspace-heading">
-          <div><span class="eyebrow">WORKSPACE / LIVE SESSION</span><h2>デバッグ作業空間</h2><p id="session-summary">インスタンス 0 · タイル 0</p></div>
-          <div class="layout-actions" role="group" aria-label="配置モード">
-            <button id="grid-mode" type="button" aria-pressed="true">▦ 一覧</button>
-            <button id="free-mode" type="button" aria-pressed="false">▤ 自由配置</button>
-          </div>
-        </div>
-        <div id="notice" class="notice" role="alert" hidden></div>
-        <div class="rom-options"><label>ROMの対象 <select id="rom-target"><option value="selected">選択中のインスタンス</option><option value="all">作成済みの全インスタンス</option></select></label><label>インスタンス <select id="rom-instance"></select></label></div>
-        <div id="workspace" class="workspace grid" aria-label="タイル作業空間"></div>
-        <p id="workspace-empty" class="workspace-empty" hidden>タイルがありません。左のパレットからツールを追加してください。</p>
-      </main>
+  <header class="topbar">
+    <div class="brand"><svg width="22" height="26" viewBox="0 0 22 26" fill="none" aria-hidden="true"><rect x="2" y="1" width="18" height="11" rx="2" stroke="currentColor"/><rect x="2" y="14" width="18" height="11" rx="2" stroke="currentColor"/><path d="M6 18v4m-2-2h4m8-1h.01m-2 2h.01" stroke="currentColor" stroke-linecap="round"/></svg><strong>melonDS</strong><span>Web</span></div>
+    <div class="top-actions">
+      <span id="backend-status" class="backend-status" role="status">起動中…</span>
+      <button id="create-instance" type="button">＋ インスタンス</button>
+      <button id="open-rom" class="primary" type="button">ROMを開く</button>
+      <input id="rom-file" type="file" accept=".nds,.srl" aria-label="ROMを開く" hidden>
     </div>
+  </header>
+  <div class="workspace-shell">
+    <aside class="palette" aria-label="ツール">
+      <div class="palette-heading">ツール</div>
+      <nav id="palette-tools" class="palette-tools" aria-label="追加するツール"></nav>
+      <div id="session-summary" class="session-summary" role="status">0 / 16</div>
+    </aside>
+    <main class="main-area">
+      <div class="workspace-toolbar">
+        <div class="rom-options">
+          <label>対象 <select id="rom-instance" aria-label="ROM読込先"></select></label>
+          <select id="rom-target" aria-label="ROM読込範囲"><option value="selected">このインスタンス</option><option value="all">全インスタンス</option></select>
+          <label id="instance-count-label">台数 <input id="instance-count" type="number" min="1" max="16" value="2" aria-label="一括読込台数"></label>
+        </div>
+        <div class="layout-actions" role="group" aria-label="配置モード">
+          <button id="grid-mode" type="button" aria-pressed="true">一覧</button>
+          <button id="free-mode" type="button" aria-pressed="false">自由配置</button>
+        </div>
+      </div>
+      <div id="notice" class="notice" role="alert" hidden></div>
+      <div id="workspace" class="workspace grid" aria-label="作業領域"></div>
+      <p id="workspace-empty" class="workspace-empty" hidden>ツールを追加</p>
+    </main>
   </div>
   <template id="palette-template"><button type="button" class="palette-item" draggable="true"><span class="palette-icon" aria-hidden="true"></span><span class="palette-name"></span><span class="palette-add" aria-hidden="true">＋</span></button></template>
   <template id="tile-template">
-    <section class="tile" aria-label="ツールタイル">
+    <section class="tile" aria-label="ツール">
       <header class="tile-header"><span class="tile-handle" aria-hidden="true">⠿</span><span class="tile-title"></span><span class="tile-id"></span><button class="tile-minimize icon-button" type="button" aria-label="最小化">−</button><button class="tile-close icon-button" type="button" aria-label="閉じる">×</button></header>
-      <div class="tile-content"><div class="tile-target"><label>INSTANCE <select class="instance-select"></select></label><label class="cpu-label">CPU <select class="cpu-select"><option>ARM9</option><option>ARM7</option></select></label></div><div class="tile-body"></div></div>
+      <div class="tile-content"><div class="tile-target"><label>対象 <select class="instance-select"></select></label><label class="cpu-label">CPU <select class="cpu-select"><option>ARM9</option><option>ARM7</option></select></label></div><div class="tile-body"></div></div>
     </section>
   </template>
-  <script type="module" src="./app.js"></script>
+  <script src="./loader.js" defer></script>
 </body>
 </html>

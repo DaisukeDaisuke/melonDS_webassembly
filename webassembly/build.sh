@@ -12,4 +12,7 @@ if ! test -f "$root/melonDS_w/src/NDS.cpp"; then
 fi
 emcmake cmake -S "$root/webassembly" -B "$root/webassembly/build" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$root/webassembly/build" --target melonds -j "${BUILD_JOBS:-2}"
-echo "Built $root/web/dist/melonds.js and melonds.wasm"
+npm ci --prefix "$root/web/sandbox/upstream" --no-audit --no-fund
+node "$root/web/scripts/build-workers.mjs"
+node "$root/web/scripts/build-app.mjs"
+echo "Built $root/public — loader.js, main.js, melonds.wasm"

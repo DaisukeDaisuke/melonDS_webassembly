@@ -3,17 +3,18 @@ export const TILE_TYPES = Object.freeze([
   'local-log', 'wifi-log', 'script', 'persistent-scripts', 'input', 'state', 'files'
 ]);
 export const LABELS = Object.freeze({
-  screen: 'Emulator Screen', debugger: 'Debugger', memory: 'Memory Viewer',
-  disassembly: 'Disassembler', registers: 'Registers', breakpoints: 'Breakpoints',
-  'local-log': 'Local Communication', 'wifi-log': 'Wi-Fi Logger', script: 'Script Console',
-  'persistent-scripts': 'Persistent Scripts', input: 'Input Controller', state: 'State Manager',
-  files: 'File Explorer'
+  screen: 'エミュレータ', debugger: 'デバッガ', memory: 'メモリ',
+  disassembly: '逆アセンブル', registers: 'レジスタ', breakpoints: 'ブレークポイント',
+  'local-log': 'ローカル通信', 'wifi-log': 'Wi-Fi', script: 'スクリプト',
+  'persistent-scripts': '常駐スクリプト', input: '入力', state: 'ステート・セーブ',
+  files: 'DLCファイル'
 });
 const KEY = 'melonds.workspace.v1';
 const defaultTiles = [
-  { type: 'screen', instanceId: 0, x: 0, y: 0, width: 316, height: 474 },
-  { type: 'debugger', instanceId: 0, x: 336, y: 0, width: 360, height: 300 },
-  { type: 'local-log', instanceId: 0, x: 716, y: 0, width: 500, height: 300 }
+  { type: 'screen', instanceId: 0, x: 0, y: 0, width: 300, height: 540 },
+  { type: 'debugger', instanceId: 0, x: 310, y: 0, width: 330, height: 340 },
+  { type: 'registers', instanceId: 0, x: 650, y: 0, width: 280, height: 340 },
+  { type: 'state', instanceId: 0, x: 940, y: 0, width: 330, height: 340 }
 ];
 
 export function makeTile(type, options = {}) {
@@ -21,7 +22,7 @@ export function makeTile(type, options = {}) {
   return {
     id: globalThis.crypto?.randomUUID?.() || `tile-${Date.now()}-${Math.random()}`,
     type, x: 0, y: 0, width: type === 'screen' ? 316 : type === 'files' ? 520 : 360,
-    height: type === 'screen' ? 474 : type === 'files' ? 440 : 300, z: 1, instanceId: 0,
+    height: type === 'screen' ? 540 : type === 'files' ? 440 : 340, z: 1, instanceId: 0,
     cpu: 'ARM9', minimized: false, settings: {}, ...options
   };
 }
@@ -40,6 +41,7 @@ export function loadLayout(storage = globalThis.localStorage) {
           id: String(t.id), x: finite(t.x, 0), y: finite(t.y, 0),
           width: Math.max(240, finite(t.width, 360)),
           height: Math.max(120, finite(t.height, 300)),
+          gridHeight: t.gridHeight ? Math.max(120, finite(t.gridHeight, 340)) : undefined,
           z: finite(t.z, 1), instanceId: t.instanceId,
           cpu: t.cpu === 'ARM7' ? 'ARM7' : 'ARM9',
           minimized: t.minimized === true,

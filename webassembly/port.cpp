@@ -4,6 +4,7 @@
 #include "LocalMP.h"
 #include "virtual-net.h"
 #include "web-debug-hooks.h"
+#include "desmume-state.h"
 #include <array>
 #include <cstring>
 #include <deque>
@@ -349,6 +350,8 @@ EMSCRIPTEN_KEEPALIVE int web_create(int id) {
     instance->id = id;
     melonDS::NDSArgs args;
     args.JIT = std::nullopt;
+    args.Firmware.GetHeader().MacAddr[5] = static_cast<melonDS::u8>(0x33 + id);
+    args.Firmware.UpdateChecksums();
     instance->nds = std::make_unique<melonDS::NDS>(std::move(args), instance.get());
     instances[id] = std::move(instance);
     instances[id]->runner = std::thread(runFrames, instances[id].get());
@@ -371,9 +374,13 @@ EMSCRIPTEN_KEEPALIVE int web_destroy(int id) {
 }
 EMSCRIPTEN_KEEPALIVE int web_load_rom(int id, const melonDS::u8* data, int length) {
     auto* inst = get(id);
-    if (!inst || !data || length < 0x200 || length > 128 * 1024 * 1024) return -1;
+    if (!inst || !data || length < 0x200 || length > 512 * 1024 * 1024) return -1;
     auto cart = melonDS::NDSCart::ParseROM(data, length, inst);
     if (!cart) return -2;
+    for (const auto& other : instances) {
+        if (other && other.get() != inst && other->nds->GetNDSCart()
+            && cart->ShareROMFrom(*other->nds->GetNDSCart())) break;
+    }
     inst->paused = true;
     abortActiveFrame(inst);
     std::lock_guard<std::mutex> guard(inst->coreMutex);
@@ -593,6 +600,14 @@ EMSCRIPTEN_KEEPALIVE int web_freeze_remove(int id, int cpu, unsigned address) {
     }
     return 0;
 }
+EMSCRIPTEN_KEEPALIVE int web_touch(int id, int x, int y, int pressed) {
+    auto* inst = get(id);
+    if (!inst || !inst->romLoaded.load() || x < 0 || x > 255 || y < 0 || y > 191) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (pressed) inst->nds->TouchScreen(x, y);
+    else inst->nds->ReleaseScreen();
+    return 0;
+}
 EMSCRIPTEN_KEEPALIVE int web_key_mask(int id, unsigned mask) {
     auto* inst = get(id); if (!inst || mask > 0xfff) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
@@ -717,6 +732,25 @@ EMSCRIPTEN_KEEPALIVE int web_state_import(int id, int slot, const melonDS::u8* d
     const bool stopped = abortSuspendedFrame(inst);
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     if (stopped) inst->nds->Start();
+    if (length >= 32 && !std::memcmp(data, "DeSmuME SState", 13)) {
+        melonDS::Savestate rollback;
+        if (!inst->nds->DoSavestate(&rollback) || rollback.Error) return -2;
+        rollback.Finish();
+        if (rollback.Error) return -2;
+        int result = melonDS::ImportDeSmuMEState(*inst->nds, data, length);
+        if (result == 0) {
+            inst->scheduledInput.clear(); inst->scheduleOffset = 0; inst->recording = false;
+            inst->stepActive = false; inst->untilActive = false; inst->skipCpu = 0; inst->watchKind = 0;
+            for (auto& trace : inst->callTrace) trace.clear();
+            result = saveStateLocked(inst, slot) < 0 ? -2 : 0;
+        }
+        if (result < 0) {
+            melonDS::Savestate restore(rollback.Buffer(), rollback.Length(), false);
+            inst->nds->DoSavestate(&restore);
+        }
+        inst->completedFrames = inst->nds->NumFrames;
+        return result;
+    }
     auto previous = std::move(inst->states[slot]);
     inst->states[slot].assign(data, data + length);
     const int result = loadStateLocked(inst, slot);

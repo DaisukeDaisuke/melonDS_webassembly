@@ -1,6 +1,8 @@
 import createModule from './dist/melonds.js';
+import pthreadSource from './dist/melonds.worker.js';
 import { decodeInstructions } from './disassemble.js';
 
+export async function startEngine(moduleURL) {
 let wasm;
 const ids = new Set();
 const romLoaded = new Set();
@@ -134,14 +136,39 @@ function execute(name, args) {
     if (name === 'saveState') return { instanceId: id, slot, length: success(call('web_save_state', id, slot), name) };
     if (name === 'loadState') {
       if (args.bytes) {
-        const bytes = new Uint8Array(args.bytes);
+        return (async () => {
+        let bytes = new Uint8Array(args.bytes);
+        if (bytes.length >= 32 && new TextDecoder().decode(bytes.subarray(0, 14)) === 'DeSmuME SState') {
+          const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+          if (view.getUint32(16, true) !== 12) throw Error('対応していないDeSmuMEステートのバージョンです');
+          const expanded = view.getUint32(24, true), compressed = view.getUint32(28, true);
+          if (expanded > 64 * 1024 * 1024) throw Error('ステートが大きすぎます');
+          if (compressed !== 0xffffffff) {
+            if (compressed !== bytes.length - 32) throw Error('DeSmuMEステートの圧縮長が一致しません');
+            const stream = new Blob([bytes.subarray(32)]).stream().pipeThrough(new DecompressionStream('deflate'));
+            const reader = stream.getReader();
+            const output = new Uint8Array(32 + expanded); output.set(bytes.subarray(0, 32));
+            let offset = 32;
+            for (;;) {
+              const { done, value } = await reader.read(); if (done) break;
+              if (value.length > output.length - offset) { await reader.cancel(); throw Error('DeSmuMEステートの展開長が一致しません'); }
+              output.set(value, offset); offset += value.length;
+            }
+            if (offset !== output.length) throw Error('DeSmuMEステートが途中で切れています');
+            new DataView(output.buffer).setUint32(28, 0xffffffff, true); bytes = output;
+          }
+        }
         return withBytes(bytes, pointer => {
-          const result = success(call('web_state_import', id, slot, pointer, bytes.length), name);
-          lastFrames.set(id, call('web_peek_frame_number', id)); return result;
+          const result = call('web_state_import', id, slot, pointer, bytes.length);
+          const messages = { '-20': 'DeSmuMEステートの項目・サイズが一致しません', '-21': 'ステートとROMが一致しません',
+            '-22': 'このDeSmuMEステートには処理途中の周辺機器があります', '-23': '未対応のDeSmuME内部形式です', '-24': 'DeSmuMEの描画データを読み込めません' };
+          if (result < 0) throw Error(messages[result] || `loadState failed (${result})`);
+          lastFrames.set(id, -1); masks[id] = call('web_key_mask_get', id); return result;
         });
+        })();
       }
       const result = success(call('web_load_state', id, slot), name);
-      lastFrames.set(id, call('web_peek_frame_number', id)); return result;
+      lastFrames.set(id, -1); masks[id] = call('web_key_mask_get', id); return result;
     }
     const size = success(call('web_state_size', id, slot), name);
     if (!size) throw Error('State slot is empty');
@@ -380,6 +407,10 @@ function execute(name, args) {
     success(call('web_input_schedule_stop', id), name);
     return { instanceId: id, stopped: true };
   }
+  if (name === 'touch') {
+    if (!Number.isInteger(args.x) || args.x < 0 || args.x > 255 || !Number.isInteger(args.y) || args.y < 0 || args.y > 191) throw RangeError('Touch coordinates must be x=0..255, y=0..191');
+    return success(call('web_touch', id, args.x, args.y, args.pressed ? 1 : 0), name);
+  }
   if (name === 'input') {
     const bit = buttons[args.key]; if (bit === undefined) throw Error('Unknown key');
     masks[id] = success(call('web_key_mask_get', id), name);
@@ -495,6 +526,7 @@ function drainDebug() {
 let requests = Promise.resolve();
 onmessage = ({ data }) => {
   if (data.type === 'screens') {
+    for (const id of data.instanceIds) if (!visibleScreens.has(id)) lastFrames.set(id, -1);
     visibleScreens.clear();
     for (const id of data.instanceIds) if (Number.isInteger(id) && id >= 0 && id < 16) visibleScreens.add(id);
     return;
@@ -524,7 +556,11 @@ onmessage = ({ data }) => {
   });
 };
 
-wasm = await createModule({ locateFile: path => new URL(`./dist/${path}`, import.meta.url).href });
+const pthreadURL = URL.createObjectURL(new Blob([pthreadSource], { type: 'text/javascript' }));
+wasm = await createModule({
+  mainScriptUrlOrBlob: moduleURL,
+  locateFile: path => path.endsWith('.worker.js') ? pthreadURL : new URL('./melonds.wasm', moduleURL).href
+});
 postMessage({ type: 'ready' });
 setInterval(() => {
   for (const id of ids) { pollFrame(id); pollAudio(id); }
@@ -532,3 +568,4 @@ setInterval(() => {
   drainWifi();
   drainDebug();
 }, 1000 / 60);
+}

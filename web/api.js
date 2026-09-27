@@ -21,7 +21,7 @@ const METHODS = Object.freeze({
   disassemble: 'instance', addBreakpoint: 'instance',
   removeBreakpoint: 'instance', listBreakpoints: 'instance', callStack: 'instance', input: 'instance',
   startInputRecording: 'instance', stopInputRecording: 'instance', getInputRecording: 'instance',
-  inputSequence: 'instance', stopInputSequence: 'instance',
+  inputSequence: 'instance', stopInputSequence: 'instance', touch: 'instance',
   screenshot: 'instance', localCommLog: 'instance', wifiLog: 'instance',
   captureFrame: 'instance', compareFrames: 'instance',
   injectNetworkFrame: 'instance', setNetworkBackend: 'instance',
