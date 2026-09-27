@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "clion2": {
+      "type": "remote",
+      "url": "http://127.0.0.1:64362/sse",
+      "headers": {
+        "IJ_MCP_SERVER_PROJECT_PATH": "C:\\Users\\owner\\Documents\\melonDS_webassembly"
+      },
+      "enabled": true,
+      "timeout": 30000
+    }
+  },
+  "permission": {
+    "bash": "ask"
+  }
+}

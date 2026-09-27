@@ -1,0 +1,410 @@
+# melonDS WebAssembly Web Debugger 実装指示書
+## 1. このプロジェクトの核心
+`melonDS_webassembly` に、完成済みのDeSmuME Web Debuggerと同等以上の機能を持つmelonDS WebAssemblyデバッグ環境を実装する。
+ただし、DeSmuME版のUIをそのまま複製するのではない。
+このプロジェクトでは、**画面・デバッガ・通信ログ・メモリビューア・スクリプト等をすべて独立した「ツールタイル」として扱い、必要なものだけを自由に配置すること**をUI設計の中心とする。
+エミュレータは最大16インスタンスまで同時に動作できる。
+各インスタンスはローカル通信とWi-Fi通信に参加でき、WebMCP・スクリプト・デバッガから明示的な `instanceId` で操作できる。
+エミュレーション本体にはWebAssemblyを標準で使用する。
+## 2. UIの基本単位は「自由配置できるツールタイル」
+画面全体を固定された巨大デバッガUIにしてはならない。
+最小単位は独立したツールタイルとする。
+例:
+- Emulator Screen
+- Debugger
+- Memory Viewer
+- Disassembler
+- Registers
+- Breakpoints
+- Local Communication Logger
+- Wi-Fi Logger
+- Script Console
+- Persistent Script Manager
+- Input Controller
+- State Manager
+必要なタイルだけを生成し、ユーザーが自由に移動・リサイズ・閉じることができるようにする。
+タイルはツールパレット等からDrag & Dropで任意の場所へスポーンできる。
+配置、サイズ、開いているタイル、対象instance等は `localStorage` に保存し、ブラウザ再読込後も復元する。
+UIそのものを特定インスタンスへ固定しない。
+## 3. Emulator Screenも独立タイルにする
+各melonDS画面自体も独立したツールタイルとする。
+「エミュレータ画面＋その専用デバッガ＋その専用ログ」という巨大なセットを16個並べてはならない。
+それをするとPC表示が破綻するため、エミュレータ画面とデバッグツールは分離する。
+例えば以下のような配置を可能にする。
+```text
++-----------+ +-----------+ +-----------+ +-----------+
+| Emulator0 | | Emulator1 | | Emulator2 | | Emulator3 |
++-----------+ +-----------+ +-----------+ +-----------+
++-----------+ +-----------+ +-------------------------+
+| Emulator4 | | Emulator5 | | Debugger                |
++-----------+ +-----------+ | target: Instance 2      |
++-------------------------+ +-------------------------+
+| Local Communication Log|
++-------------------------+
+```
+画面数が増えても「全インスタンスに全UIを付ける」設計にはしない。
+## 4. エミュレータ一覧は4×Nを基本とし、ブラウザに配置させる
+エミュレータ画面を固定横一列＋横スクロールにはしない。
+一覧表示モードではCSS Grid/Flex等を使い、PCでは概ね4列を基準とした `4 × N` 配置にする。
+ただし画面幅、ズーム、タイルサイズに応じた最終配置はブラウザのレイアウトエンジンに任せる。
+16個を固定サイズで横方向へ延々並べたり、縦方向へ巨大な固定レイアウトを作ったりしない。
+一覧配置と自由配置は両立させる。
+つまり、
+- 自動整列させたい場合はGrid
+- 好きな場所へ置きたい場合は自由配置
+を利用者が選べるようにする。
+## 5. デバッガは各エミュレータに内蔵しない
+デバッガは独立したツールタイルとする。
+デバッガ自身に対象インスタンス選択UIを持たせる。
+```text
+Debugger
+Target Instance: [ 0 ▼ ]
+CPU:             [ ARM9 ▼ ]
+```
+対象をInstance 0からInstance 7へ切り替えた場合、同じデバッガタイルがInstance 7を表示する。
+16台あるから16個のデバッガを自動生成する、という設計は禁止する。
+必要ならユーザーがDebuggerタイルを複数生成してよい。
+例えば、
+```text
+Debugger A → Instance 0
+Debugger B → Instance 4
+Debugger C → Instance 9
+```
+という使い方を可能にする。
+Registers、Memory、Disassembler等の補助タイルも同じ思想とする。
+## 6. 最大16インスタンス
+melonDSの既存マルチインスタンス設計を利用し、最大16台を同時稼働可能にする。
+`instanceId` は `0..15`。
+LocalMPが既に16インスタンスを前提としているため、その構造をできる限り維持する。
+インスタンスごとに以下を分離する。
+- emulator state
+- ROM
+- Save
+- State
+- input
+- ARM9/ARM7 state
+- breakpoints
+- network state
+- scripts
+- audio/video state
+- debugger state
+- communication logs
+「現在画面で選択されているエミュレータ」をAPIの暗黙対象にしてはならない。
+## 7. ROMロード
+ROMロードは二通り対応する。
+### 個別ロード
+任意の一つのinstanceへROMをロードできる。
+```js
+await loadRom({
+    instanceId: 5,
+    file
+});
+```
+### 一括ロード
+指定したN個のinstanceへ同じROMを一括ロードできる。
+例:
+```js
+await loadRomMany({
+    instanceIds: [0, 1, 2, 3],
+    file
+});
+```
+または16台生成時に同じROMを一括割当できるUIを設ける。
+一括ロードが存在しても、個別ROMロード機能を削除してはならない。
+異なるROMを各instanceへ割り当てることも可能にする。
+Save、Stateについてもinstance単位で扱う。
+## 8. DeSmuME版Web Debuggerの機能を移植する
+完成済み `desmume_webassembly-main` を機能基準とする。
+melonDS版では最低限、以下を利用可能にする。
+- pause / resume
+- reset
+- step
+- step over
+- run until
+- breakpoint
+- ARM9 / ARM7 register read/write
+- memory read/write
+- memory search
+- memory freeze
+- disassembly
+- Save/State import/export
+- State slot
+- screenshots
+- frame capture / compare
+- input control
+- input sequence
+- input recording/replay
+- wait系API
+- batch操作
+- script実行
+- persistent scripts
+- WebMCP
+- operation cancellation/status
+Call StackについてはmelonDSで実現可能な範囲で実装する。
+DeSmuME版ほど自然に取れない場合でも、CPU実行トレース等から可能な限り再構築してよい。
+## 9. 破壊・状態変更操作は完全にawait可能にする
+状態変更を伴うAPIはPromiseを返す。
+重要なのは、**API呼び出しを受け付けただけでPromiseをresolveしてはならない**ことである。
+例えば、
+```js
+await melonds.reset({ instanceId: 2 });
+```
+が帰った時点では、
+- reset要求をqueueへ入れた
+ではなく、
+- reset処理が実際に完了した
+- 古い実行状態が破棄された
+- 新しい状態が利用可能になった
+まで保証する。
+同様に以下も実処理完了までawaitを返さない。
+- ROM load
+- ROM reload
+- reset
+- State load
+- State save
+- instance create
+- instance destroy
+- pause
+- resume
+- step
+- breakpoint更新
+- Save import
+- persistent script start/stop/restart
+- network backend切替
+特に、内部でWorker/Wasm/Audio/Renderer等を破棄・再生成する操作では、破壊処理の完了前にPromiseをresolveしてはならない。
+API利用者は、
+```js
+await operationA();
+await operationB();
+```
+と書けば、Aが完全に終わった後にBが始まると信頼できる必要がある。
+## 10. WebMCPはDeSmuME版と同等レベルまで公開する
+WebMCPを、
+```text
+melonds.list
+melonds.call
+melonds.eval
+melonds.runScript
+```
+程度の薄いラッパーだけにしてはならない。
+`runScript` だけを特別なトップレベルAPIにする理由もない。
+主要機能はWebMCPの第一級toolとして直接公開する。
+例:
+```text
+melonds.listInstances
+melonds.createInstance
+melonds.destroyInstance
+melonds.status
+melonds.pause
+melonds.resume
+melonds.reset
+melonds.step
+melonds.stepOver
+melonds.loadRom
+melonds.loadRomMany
+melonds.loadState
+melonds.saveState
+melonds.getRegisters
+melonds.setRegister
+melonds.readMemory
+melonds.writeMemory
+melonds.disassemble
+melonds.addBreakpoint
+melonds.removeBreakpoint
+melonds.listBreakpoints
+melonds.input
+melonds.screenshot
+melonds.runScript
+melonds.startPersistentScript
+melonds.stopPersistentScript
+melonds.restartPersistentScript
+melonds.listPersistentScripts
+melonds.callPersistentScriptMcp
+melonds.localCommLog
+melonds.wifiLog
+melonds.batch
+```
+内部実装で共通dispatcherを使うのは構わない。
+しかし外部WebMCP APIを「全部 `melonds.call(command)` で呼んでください」にして、機能発見性を失わせてはならない。
+## 11. instanceIdは必須
+instance固有のWebMCP/APIには必ず `instanceId` を要求する。
+```js
+await melonds.readMemory({
+    instanceId: 3,
+    address: 0x02000000,
+    length: 64
+});
+```
+instanceIdがない場合に、UIで現在選択されているinstanceを勝手に使用してはならない。
+global APIのみ例外とする。
+例:
+- listInstances
+- createInstance
+- loadRomMany
+## 12. 永続スクリプトサンドボックス
+DeSmuME版の永続スクリプトサンドボックスは基本的にそのまま移植する。
+新しくmelonDS用の簡易版を作り直さない。
+DeSmuME版が持つ、
+- persistent script
+- Worker分離
+- sandbox
+- event callback
+- breakpoint callback
+- persistent MCP
+- start/stop/restart
+- async/blocking semantics
+- timeout
+- queue
+- isolation
+等の挙動を維持し、エミュレータ操作RPC部分のみmelonDSへ接続する。
+persistent scriptにもinstanceIdを持たせる。
+## 13. LocalMP
+melonDS既存のLocalMPを利用し、最大16instanceのローカル通信を成立させる。
+ゲーム固有の通信結果をJavaScript側で偽装してはいけない。
+実際のmelonDSローカル通信経路を通す。
+## 14. Local Communication Loggerを独立タイルとして実装する
+ローカル通信の観測はこのプロジェクトの重要なデバッグ機能とする。
+これはWi-Fi/DWC解析の付属機能ではなく、**LocalMPそのものを見る独立したロガー**である。
+`Local Communication Logger` タイルを自由にスポーンできるようにする。
+例:
+```text
++------------------------------------------------------+
+| Local Communication Logger                          |
+| Instances: [0] [1] [2] [3]      [Clear] [Pause]    |
++------------------------------------------------------+
+| time       src dst type     size   payload           |
+| 12.381     0   1   CMD      24     01 00 8A ...     |
+| 12.382     1   0   REPLY    12     04 92 ...        |
+| 12.390     0   *   PACKET   32     ...              |
++------------------------------------------------------+
+```
+最低限、
+- timestamp
+- source instance
+- destination/receiver
+- SenderID
+- packet type
+- packet length
+- raw payload
+を表示する。
+payloadはhex表示できるようにする。
+通信がゲーム側で暗号化・難読化されている場合でも、まず**実際にLocalMPへ流れているraw bytesをそのまま観測できること**を優先する。
+復号できるかどうかは別問題であり、ロガー実装の前提条件にしない。
+必要なら複数instanceを同時表示できる。
+例えばInstance 0↔1だけに絞ったり、全16台を見ることも可能にする。
+ログはWebMCPからも取得できるようにする。
+## 15. LocalMPのhook
+LocalMPロガーでは、送受信の主要境界を観測する。
+少なくとも、
+```text
+SendPacket
+RecvPacket
+SendCmd
+SendReply
+SendAck
+RecvHostPacket
+RecvReplies
+```
+相当の経路で、通信内容を失わずログへ渡せるようにする。
+ただしログ機能追加によってLocalMPのタイミングや通信挙動を変えてはならない。
+## 16. Wi-Fi
+LocalMPとは別に、melonDSの通常Wi-FiもWeb上で使用可能にする。
+melonDSのWi-Fi/NetDriver経路からブラウザ内仮想ネットワークへ接続する。
+```text
+DS
+↓
+melonDS Wi-Fi
+↓
+NetDriver
+↓
+Browser Virtual Network
+↓
+Virtual Server
+```
+ゲームが発生させた通信を経由せず、JavaScriptが直接ゲームサーバーAPIを呼び出して結果だけ返す実装にはしない。
+## 17. Wi-Fi Logger
+Wi-Fiについても独立したLoggerタイルを生成可能にする。
+Local Communication Loggerとは別タイルとする。
+Wi-Fi Loggerでは最低限、
+- instanceId
+- TX/RX
+- timestamp
+- raw frame/packet
+- protocolが判別可能ならprotocol
+- raw payload
+を確認できるようにする。
+DNS、TCP、HTTP等まで解析可能なら表示してよい。
+ただし「高機能パケットアナライザの完成」が主目的ではない。
+最優先はmelonDSが実際に送受信したデータを取りこぼさず観測できることである。
+## 18. 暗号化通信
+LocalMPまたはWi-Fi上のpayloadが暗号化されている場合でも、生データを必ず取得できるようにする。
+復号可能なポイントがmelonDSまたはブラウザ内仮想サーバー内部に存在する場合は、追加情報として復号前・復号後の両方を表示してよい。
+ただし、
+- LocalMP Logger
+- Wi-Fi Logger
+を作ることが本体であり、TLS解析機能を作ること自体をプロジェクトの中心にしない。
+## 19. ブラウザ内仮想サーバー
+JavaScriptからブラウザ内仮想サーバーを構成できるAPIを用意する。
+DWCについては `dq9_micro_dwc_server_emulator.cpp-main` を参考にする。
+DQ9等がmelonDSの通常Wi-Fi経路を使って、
+```text
+DNS
+→ Nintendo Wi-Fi/DWC
+→ authentication
+→ download service
+```
+へ接続できるようにする。
+仮想サーバーはエミュレータ本体とは分離し、通信サービスとして実装する。
+## 20. すべてのツールは対象instanceを切り替えられる
+Debuggerだけでなく、
+- Memory
+- Registers
+- Disassembler
+- Breakpoints
+- Input
+- State
+- Script
+- Logger
+等も、可能なものはタイル上部からinstanceを切り替えられる構造とする。
+例:
+```text
+Memory Viewer
+Instance: [ 6 ▼ ]
+Address:  [ 02000000 ]
+```
+ツールタイルを16セット生成するのではなく、必要なタイルを必要な数だけ生成する。
+## 21. レイアウト永続化
+タイルについて以下を保存する。
+- type
+- x/y
+- width/height
+- z-index/order
+- selected instanceId
+- selected CPU
+- tool固有設定
+- minimized state
+ブラウザ再読み込み時に復元する。
+ROMそのもの等、localStorageへ格納するのが不適切な大容量データは別ストレージを使用してよい。
+## 22. 完成条件
+このプロジェクトが完成したと判断する核心条件は以下。
+1. melonDSがWebAssemblyで動作する。
+2. 最大16instanceを同時起動できる。
+3. エミュレータ画面は独立した移動可能タイルである。
+4. タイルは自由配置・リサイズ可能で、配置が保存される。
+5. 一覧表示時は4×Nを基準にブラウザが自然にレイアウトする。
+6. デバッガを各エミュレータへ埋め込まず、独立タイルからinstanceを切り替えて使用できる。
+7. DeSmuME Web Debuggerの主要機能がmelonDSで使用できる。
+8. 永続スクリプトサンドボックスがDeSmuME版相当で移植されている。
+9. WebMCPは主要操作を第一級toolとして公開する。
+10. instance固有操作ではinstanceIdが必須である。
+11. 状態変更APIは実処理完了までawaitを返さない。
+12. 同じROMをN instanceへ一括ロードできる。
+13. 各instanceへ異なるROMを個別ロードできる。
+14. LocalMPで複数instanceが実際に通信できる。
+15. Local Communication LoggerタイルからLocalMPのraw通信内容をリアルタイム観測できる。
+16. Wi-Fi通信がブラウザ内仮想ネットワークへ接続できる。
+17. Wi-Fi Loggerから実際の送受信内容を観測できる。
+18. DWC等の仮想サーバーをJavaScript APIから提供できる。
+19. 16instanceを同時利用しても状態、入力、通信、スクリプト、デバッグ対象が混線しない。
+最終目標は「16個のmelonDSを一画面に並べること」ではない。
+**最大16個のmelonDSを一つのブラウザ上で動かし、その周囲に必要なデバッグツールを自由にスポーン・配置・切替でき、LocalMP/Wi-Fi/WebMCP/永続スクリプトまで一つの作業空間として扱えるWebAssemblyデバッグ環境を作ること**を完成形とする。
