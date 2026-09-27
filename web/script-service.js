@@ -1,11 +1,15 @@
 // Hosts the pinned DeSmuME supervisor -> parser -> sandbox Worker chain.
 // The original Worker sources are bundled by scripts/build-workers.mjs; this
 // module only adapts the authenticated RPC boundary to explicit melonDS ids.
+import { validateWorkerRpc } from './sandbox/upstream/src/script-rpc-policy.js';
+import { assertSafeScriptSource } from './sandbox/upstream/src/script-source-policy.js';
+import { ResourceLimits } from './sandbox/upstream/src/resource-limits.js';
+import { normalizePersistentMcpParams } from './sandbox/upstream/src/worker-rpc-payload.js';
 const persistentMethods = new Set(['startPersistentScript', 'stopPersistentScript',
   'restartPersistentScript', 'listPersistentScripts', 'callPersistentScriptMcp', 'runScript']);
-const MAX_SCRIPTS = 16;
+const MAX_SCRIPTS = ResourceLimits.persistentScripts;
 const MAX_SOURCE = 262144;
-const MAX_PENDING_RPC = 32;
+const MAX_PENDING_RPC = ResourceLimits.pendingWorkerRpc;
 const scriptName = name => /^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(name);
 const wait = (ms, message) => new Promise((_, reject) => setTimeout(() => reject(Error(message)), ms));
 function hostedWorker(source) {
@@ -24,6 +28,7 @@ function checkedCode(code) {
   if (typeof code !== 'string' || !code.trim() || code.length > MAX_SOURCE) {
     throw Error(`Script source must be 1..${MAX_SOURCE} characters`);
   }
+  assertSafeScriptSource(code);
 }
 
 export function createScriptBackend(native) {
@@ -94,9 +99,14 @@ export function createScriptBackend(native) {
         if (record.pending.size >= MAX_PENDING_RPC || !message.id || record.pending.has(message.id)) {
           fatal('Worker RPC limit or duplicate ID'); return;
         }
-        record.pending.add(message.id);
-        void rpc(record, message.type === 'register' ? 'register' : message.command,
-          message.type === 'register' ? message.trigger : message.params).then(result => {
+        let request;
+        try {
+          request = message.type === 'register'
+            ? { command: 'register', params: message.trigger }
+            : validateWorkerRpc(message, record.pending);
+          if (message.type === 'register') record.pending.add(message.id);
+        } catch (error) { fatal(error); return; }
+        void rpc(record, request.command, request.params).then(result => {
           if (record.running) host.worker.postMessage({ replyId: message.id, result });
         }, error => {
           if (record.running) host.worker.postMessage({ replyId: message.id,
@@ -155,6 +165,7 @@ export function createScriptBackend(native) {
     if (!record?.registered || !record.mcps.some(item => item.name === name)) throw Error('Persistent MCP not found');
     if (record.pendingMcp.size >= MAX_PENDING_RPC) throw Error('Persistent MCP queue full');
     const callId = ++record.callSerial;
+    params = normalizePersistentMcpParams(params);
     const pending = deferred(); record.pendingMcp.set(callId, pending);
     record.host.worker.postMessage({ type: 'pscriptMcpInvoke', scriptInstanceId: record.scriptInstanceId,
       callId, name, params, blocking: !!blocking });
@@ -166,14 +177,19 @@ export function createScriptBackend(native) {
     const { sources: bundled, dependency } = await sources();
     const host = hostedWorker(bundled['eval-supervisor']);
     const completed = deferred();
+    const seen = new Set();
     host.worker.onmessage = ({ data: message }) => {
       if (message.type === 'ready' && message.hardened && message.layer === 'supervisor') {
         host.worker.postMessage({ type: 'run', code, parserSource: bundled.parser,
           sandboxSource: bundled.eval, dependency, shortcuts: [] });
       } else if (message.type === 'call') {
-        void rpc({ instanceId }, message.command, message.params).then(result => {
+        let request;
+        try { request = validateWorkerRpc(message, seen); }
+        catch (error) { completed.reject(error); return; }
+        void rpc({ instanceId }, request.command, request.params).then(result => {
           host.worker.postMessage({ replyId: message.id, result });
-        }, error => host.worker.postMessage({ replyId: message.id, error: String(error?.message || error) }));
+        }, error => host.worker.postMessage({ replyId: message.id, error: String(error?.message || error) }))
+          .finally(() => seen.delete(message.id));
       } else if (message.type === 'done') completed.resolve(message.result);
       else if (message.type === 'error' || message.type === 'protocolError') completed.reject(Error(message.error?.message || message.message));
     };
