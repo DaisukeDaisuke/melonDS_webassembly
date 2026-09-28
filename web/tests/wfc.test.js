@@ -96,6 +96,7 @@ test('TCP answers handshake and paces HTTP response by client ACK', async () => 
     b.set([10, 0, 0, 100], 26); b.set([10, 0, 0, 1], 30);
     put16(b, 34, 12345); put16(b, 36, 80);
     put32(b, 38, seq); put32(b, 42, ack); b[46] = 0x50; b[47] = flags;
+    put16(b, 48, 8192);
     b.set(bytes, 54);
     return b;
   }
@@ -117,7 +118,7 @@ test(`SSLv3 RSA/RC4-${algorithm} handshake decrypts an HTTP request on the priva
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 1024 });
   const server = createSsl3Server({
     certificatePem: '-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----',
-    chainPem: '-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----',
+    chainPem: '-----BEGIN CERTIFICATE-----\nMAE=\n-----END CERTIFICATE-----',
     privateKeyPem: privateKey.export({ type: suite === 5 ? 'pkcs8' : 'pkcs1', format: 'pem' }),
     onRequest: async request => httpBytes({ status: 200, headers: {}, body: request.body })
   });
@@ -138,7 +139,7 @@ test(`SSLv3 RSA/RC4-${algorithm} handshake decrypts an HTTP request on the priva
   assert.equal(messages[1][0], 11);
   assert.equal(messages[1][6], 10); // Two length-prefixed DER certificates.
   assert.deepEqual([...messages[1].subarray(7, 12)], [0, 0, 2, 0x30, 0]);
-  assert.deepEqual([...messages[1].subarray(12, 17)], [0, 0, 2, 0x30, 0]);
+  assert.deepEqual([...messages[1].subarray(12, 17)], [0, 0, 2, 0x30, 1]);
   const serverRandom = messages[0].subarray(6, 38);
   const premaster = cat([3, 0], Buffer.alloc(46, 3));
   const encrypted = publicEncrypt({ key: publicKey, padding: constants.RSA_PKCS1_PADDING }, premaster);

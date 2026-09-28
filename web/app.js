@@ -640,8 +640,64 @@ function renderTile(tile) {
     event.preventDefault(); tile.gridSpan = Math.max(1, Math.min(columns(), (tile.gridSpan || 1) + (event.key === 'ArrowRight' ? 1 : -1))); node._gridSpan(); save();
   };
   node.addEventListener('pointerdown', () => { tile.z = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1; node.style.zIndex = tile.z; save(); });
-  node.querySelector('.tile-header').addEventListener('pointerdown', event => {
-    if (layout.mode !== 'free' || event.button !== 0 || event.target.closest('button')) return;
+  const header = node.querySelector('.tile-header');
+  header.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.target.closest('button')) return;
+    if (layout.mode === 'grid') {
+      if (!event.target.closest('.tile-handle')) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = node.getBoundingClientRect();
+      const count = columns(), gap = parseFloat(getComputedStyle(workspace).columnGap) || 0;
+      const unit = (workspace.clientWidth + gap) / count;
+      const span = Math.max(1, Math.min(count, Math.round((rect.width + gap) / unit)));
+      const placeholder = el('div', 'tile-drop-placeholder');
+      placeholder.style.height = `${rect.height}px`; placeholder.style.gridColumn = `span ${span}`;
+      node.before(placeholder);
+      const previousStyle = Object.fromEntries(['position', 'left', 'top', 'width', 'height', 'zIndex', 'pointerEvents', 'resize']
+        .map(property => [property, node.style[property]]));
+      const offsetX = event.clientX - rect.left, offsetY = event.clientY - rect.top;
+      header.setPointerCapture(event.pointerId); document.body.classList.add('is-grabbing'); node.classList.add('grid-dragging');
+      Object.assign(node.style, {
+        position: 'fixed', left: `${rect.left}px`, top: `${rect.top}px`,
+        width: `${rect.width}px`, height: `${rect.height}px`,
+        zIndex: '10001', pointerEvents: 'none', resize: 'none'
+      });
+      const movePlaceholder = (x, y) => {
+        const candidates = [...workspace.querySelectorAll('.tile')].filter(candidate => candidate !== node);
+        if (!candidates.length) { workspace.append(placeholder); return; }
+        let closest = null, closestRect = null, closestDistance = Infinity;
+        for (const candidate of candidates) {
+          const candidateRect = candidate.getBoundingClientRect();
+          const dx = x - (candidateRect.left + candidateRect.width / 2);
+          const dy = y - (candidateRect.top + candidateRect.height / 2);
+          const distance = dx * dx + dy * dy;
+          if (distance < closestDistance) { closest = candidate; closestRect = candidateRect; closestDistance = distance; }
+        }
+        const centerY = closestRect.top + closestRect.height / 2;
+        const sameRow = y >= closestRect.top && y <= closestRect.bottom;
+        const after = sameRow ? x > closestRect.left + closestRect.width / 2 : y > centerY;
+        closest[after ? 'after' : 'before'](placeholder);
+      };
+      const move = e => {
+        node.style.left = `${e.clientX - offsetX}px`; node.style.top = `${e.clientY - offsetY}px`;
+        movePlaceholder(e.clientX, e.clientY);
+      };
+      const end = e => {
+        document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end);
+        document.body.classList.remove('is-grabbing'); node.classList.remove('grid-dragging');
+        if (e.type === 'pointercancel') placeholder.remove();
+        else {
+          movePlaceholder(e.clientX, e.clientY);
+          placeholder.replaceWith(node);
+          const order = new Map([...workspace.querySelectorAll('.tile')].map((element, index) => [element.dataset.id, index]));
+          layout.tiles.sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+        }
+        Object.assign(node.style, previousStyle); save();
+      };
+      document.addEventListener('pointermove', move); document.addEventListener('pointerup', end); document.addEventListener('pointercancel', end);
+      return;
+    }
+    if (layout.mode !== 'free') return;
     const startX = event.clientX, startY = event.clientY, left = tile.x, top = tile.y;
     const handle = event.currentTarget; handle.setPointerCapture(event.pointerId);
     document.body.classList.add('is-grabbing');
@@ -650,7 +706,7 @@ function renderTile(tile) {
     handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
   });
   node._resizeObserver = new ResizeObserver(() => {
-    if (!node.isConnected || tile.minimized) return;
+    if (!node.isConnected || tile.minimized || node.classList.contains('grid-dragging')) return;
     const rect = node.getBoundingClientRect();
     if (layout.mode !== 'free') {
       if (tile.gridHeight !== Math.round(rect.height)) { tile.gridHeight = Math.round(rect.height); save(); }
@@ -692,37 +748,43 @@ function renderPalette() {
   $('#palette-tools').append(node);
   const item = el('div', 'tool-order-row'); item.dataset.type = type;
   item.append(el('span', 'tool-order-grip', '⠿'), el('span', '', LABELS[type]));
-  const reorder = (source, target, after) => {
-    const next = order.filter(value => value !== source), position = next.indexOf(target);
-    if (position < 0 || source === target) return;
-    next.splice(position + (after ? 1 : 0), 0, source); layout.toolOrder = next; save(); renderPalette();
-  };
-  const clearDrag = () => { document.body.classList.remove('is-grabbing'); for (const row of $('#tool-order-list').children) row.classList.remove('moving'); };
-  item.draggable = true;
-  item.ondragstart = event => {
-    event.dataTransfer.setData('application/x-melonds-tool-order', type); event.dataTransfer.effectAllowed = 'move';
-    document.body.classList.add('is-grabbing'); item.classList.add('moving');
-  };
-  item.ondragover = event => { if (event.dataTransfer.types.includes('application/x-melonds-tool-order')) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; } };
-  item.ondrop = event => {
-    const source = event.dataTransfer.getData('application/x-melonds-tool-order'); if (!order.includes(source)) return;
-    event.preventDefault(); event.stopPropagation(); const rect = item.getBoundingClientRect(); clearDrag();
-    reorder(source, type, event.clientY > rect.top + rect.height / 2);
-  };
-  item.ondragend = clearDrag;
   item.onpointerdown = event => {
-    if (event.pointerType === 'mouse' || event.button !== 0) return;
-    event.preventDefault(); item.setPointerCapture(event.pointerId);
-    document.body.classList.add('is-grabbing'); item.classList.add('moving');
-    let target = null, after = false;
+    if (event.button !== 0 || !event.target.closest('.tool-order-grip')) return;
+    event.preventDefault(); event.stopPropagation();
+    const list = $('#tool-order-list'), rect = item.getBoundingClientRect();
+    const placeholder = el('div', 'tool-order-placeholder');
+    placeholder.style.height = `${rect.height}px`; item.before(placeholder);
+    const previousStyle = Object.fromEntries(['position', 'left', 'top', 'width', 'height', 'zIndex', 'pointerEvents']
+      .map(property => [property, item.style[property]]));
+    const offsetX = event.clientX - rect.left, offsetY = event.clientY - rect.top;
+    item.setPointerCapture(event.pointerId); document.body.classList.add('is-grabbing'); item.classList.add('moving');
+    Object.assign(item.style, {
+      position: 'fixed', left: `${rect.left}px`, top: `${rect.top}px`,
+      width: `${rect.width}px`, height: `${rect.height}px`, zIndex: '10002', pointerEvents: 'none'
+    });
     const move = e => {
-      const row = document.elementFromPoint(e.clientX, e.clientY)?.closest('.tool-order-row');
-      if (!row || row === item) return;
-      target = row.dataset.type; const rect = row.getBoundingClientRect(); after = e.clientY > rect.top + rect.height / 2;
+      item.style.left = `${e.clientX - offsetX}px`; item.style.top = `${e.clientY - offsetY}px`;
+      const rows = [...list.querySelectorAll('.tool-order-row')].filter(row => row !== item);
+      if (!rows.length) { list.append(placeholder); return; }
+      let closest = null, closestRect = null, closestDistance = Infinity;
+      for (const row of rows) {
+        const rowRect = row.getBoundingClientRect(), distance = Math.abs(e.clientY - (rowRect.top + rowRect.height / 2));
+        if (distance < closestDistance) { closest = row; closestRect = rowRect; closestDistance = distance; }
+      }
+      closest[e.clientY > closestRect.top + closestRect.height / 2 ? 'after' : 'before'](placeholder);
     };
     const end = e => {
       document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end);
-      clearDrag(); if (target && e.type !== 'pointercancel') reorder(type, target, after);
+      document.body.classList.remove('is-grabbing'); item.classList.remove('moving');
+      const committed = e.type !== 'pointercancel';
+      if (e.type === 'pointercancel') placeholder.remove();
+      else {
+        move(e);
+        placeholder.replaceWith(item);
+        layout.toolOrder = [...list.querySelectorAll('.tool-order-row')].map(row => row.dataset.type);
+      }
+      Object.assign(item.style, previousStyle); save();
+      if (committed) renderPalette();
     };
     document.addEventListener('pointermove', move); document.addEventListener('pointerup', end); document.addEventListener('pointercancel', end);
   };
