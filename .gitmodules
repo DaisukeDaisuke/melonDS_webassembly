@@ -4,3 +4,6 @@
 [submodule "interface-design"]
 	path = interface-design
 	url = git@github.com:Dammyjay93/interface-design.git
+[submodule "wolfssl"]
+	path = wolfssl
+	url = https://github.com/wolfSSL/wolfssl.git
