@@ -1,9 +1,16 @@
 [submodule "melonDS_w"]
 	path = melonDS_w
 	url = git@github.com:DaisukeDaisukeForks/melonDS_w.git
+	shallow = true
 [submodule "interface-design"]
 	path = interface-design
 	url = git@github.com:Dammyjay93/interface-design.git
+	shallow = true
 [submodule "wolfssl"]
 	path = wolfssl
 	url = https://github.com/wolfSSL/wolfssl.git
+	shallow = true
+[submodule "webassembly/vendor/desmume-source"]
+	path = webassembly/vendor/desmume-source
+	url = https://github.com/DaisukeDaisukeForks/desmume.git
+	shallow = true
