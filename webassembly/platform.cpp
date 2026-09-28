@@ -131,7 +131,10 @@ u64 FileLength(FileHandle* f) {
     fseek(f->stream, position, SEEK_SET);
     return length < 0 ? 0 : length;
 }
-void Log(LogLevel, const char* fmt, ...) { va_list args; va_start(args, fmt); vfprintf(stderr, fmt, args); va_end(args); }
+void Log(LogLevel level, const char* fmt, ...) {
+    if (level == LogLevel::Debug) return;
+    va_list args; va_start(args, fmt); vfprintf(stderr, fmt, args); va_end(args);
+}
 Thread* Thread_Create(std::function<void()> fn) { return new Thread { std::thread(std::move(fn)) }; }
 void Thread_Wait(Thread* t) { if (t && t->worker.joinable()) t->worker.join(); }
 void Thread_Free(Thread* t) { if (!t) return; Thread_Wait(t); delete t; }
