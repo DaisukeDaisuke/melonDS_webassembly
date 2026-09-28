@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { readFile, writeFile, mkdir, copyFile, cp } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, cp, rm } from 'node:fs/promises';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -29,9 +29,11 @@ const css = await readFile(join(root, 'web/style.css'), 'utf8') + '\n' + await r
 await writeFile(join(out, 'index.html'), html.replace('<link rel="stylesheet" href="./style.css">', `<style>${css}</style>`));
 const buildId = createHash('sha256').update(await readFile(join(out, 'main.js'))).update(await readFile(join(root, 'web/dist/melonds.wasm'))).digest('hex').slice(0, 20);
 await writeFile(join(out, 'loader.js'), (await readFile(join(root, 'web/loader.js'), 'utf8')).replace('__MELONDS_BUILD_ID__', buildId));
+await rm(join(out, 'dist'), { recursive: true, force: true });
+await cp(join(root, 'web/dist'), join(out, 'dist'), { recursive: true });
 await copyFile(join(root, 'web/dist/melonds.wasm'), join(out, 'melonds.wasm'));
 await copyFile(join(root, 'LICENSE'), join(out, 'LICENSE'));
 await copyFile(join(root, 'API.md'), join(out, 'API.md'));
 try { await cp(join(root, 'web/dq9/certs'), join(out, 'dq9/certs'), { recursive: true }); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
-console.log('public: index.html, loader.js, main.js, melonds.wasm');
+console.log('public: index.html, loader.js, main.js, melonds.wasm, dist/');
