@@ -21,6 +21,19 @@ const layout = loadLayout();
 const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], names: new Map(), logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
+const dirtyLogs = new Set();
+let logRepaint = 0;
+function queueLogUpdate(type) {
+  dirtyLogs.add(type);
+  if (logRepaint) return;
+  logRepaint = setTimeout(() => {
+    logRepaint = 0;
+    for (const type of dirtyLogs) {
+      for (const tile of workspace.querySelectorAll(`[data-type="${type}"]`)) tile.querySelector('.tile-body').dispatchEvent(new Event('packet'));
+    }
+    dirtyLogs.clear();
+  }, 100);
+}
 const stateWarnings = new Map();
 const audio = createAudioBus({ onTargets: ids => backend.setAudioTargets(ids), onChange: updateAudioTargets });
 globalThis.melondsAudio = Object.freeze({ stats: () => audio.stats() });
@@ -29,7 +42,7 @@ globalThis.melondsVirtualNetwork = createVirtualNetwork(api, { onEvent: event =>
   if (event.type !== 'wifi-log') return;
   state.logs['wifi-log'].push(event);
   if (state.logs['wifi-log'].length > 2000) state.logs['wifi-log'].splice(0, state.logs['wifi-log'].length - 2000);
-  for (const tile of workspace.querySelectorAll('[data-type="wifi-log"]')) tile.querySelector('.tile-body').dispatchEvent(new Event('packet'));
+  queueLogUpdate('wifi-log');
 } });
 globalThis.melondsFiles = globalThis.melondsVirtualNetwork.files;
 globalThis.melondsWorkspace = createWorkspaceService({ api, backend, network: globalThis.melondsVirtualNetwork,
@@ -161,18 +174,20 @@ function renderLog(body, tile) {
   const table = el('table', tile.type === 'wifi-log' ? 'packet-table network-log' : 'packet-table');
   const head = el('thead'); const header = el('tr');
   for (const label of ['時刻', '方向', '送信元', '宛先', 'プロトコル', '長さ', '内容']) header.append(el('th', '', label));
-  head.append(header); table.append(head); const tbody = el('tbody'); table.append(tbody); body.append(table);
+  head.append(header); table.append(head); const tbody = el('tbody', 'packet-rows'); table.append(tbody); body.append(table);
   const empty = el('p', 'muted', '受信データはまだありません。'); body.append(empty);
   const detail = el('pre', 'network-detail'); detail.hidden = true; body.append(detail);
   let selectedPacket = null;
+  const cachedRows = new WeakMap();
   function update() {
     if (tile.settings.paused) return;
-    tbody.replaceChildren();
     const entries = state.logs[tile.type].filter(packet => (!tile.settings.decodedOnly || packet.logical) &&
       (tile.settings.all || packet.instanceId === tile.instanceId || packet.destination === tile.instanceId)).slice(-100);
     empty.hidden = !!entries.length;
-    for (const packet of entries) {
-      const tr = el('tr');
+    const rows = entries.map(packet => {
+      let tr = cachedRows.get(packet);
+      if (!tr) {
+      tr = el('tr');
       const sender = tile.type === 'wifi-log' && packet.direction === 'RX' ? 'NET' : packet.senderId ?? packet.instanceId;
       const receiver = tile.type === 'wifi-log' ? (packet.direction === 'RX' ? packet.instanceId : 'NET') : packet.destination ?? '*';
       const decoded = tile.type === 'wifi-log' ? (packet.decoded ||= decodePacket(packet)) : null;
@@ -180,21 +195,27 @@ function renderLog(body, tile) {
       for (const value of [packet.timestamp, packet.direction || 'TX', decoded?.source || sender, decoded?.destination || receiver,
         decoded?.protocol || packet.packetType || 'PACKET', packet.length ?? packet.payload?.length ?? 0,
         decoded?.summary || Array.from(packet.payload?.slice(0, 64) || [], n => n.toString(16).padStart(2, '0')).join(' ')]) tr.append(el('td', '', String(value)));
-      tr.tabIndex = 0; tr.classList.toggle('selected', selectedPacket === packet);
+      tr.tabIndex = 0;
       tr.onclick = () => { selectedPacket = packet; for (const selected of tbody.querySelectorAll('.selected')) selected.classList.remove('selected'); tr.classList.add('selected'); detail.hidden = false; detail.textContent = decoded?.detail || raw(); };
       tr.onkeydown = event => { if (event.key === 'Enter') tr.click(); };
-      tbody.append(tr);
+      cachedRows.set(packet, tr);
+      }
+      tr.classList.toggle('selected', selectedPacket === packet);
+      return tr;
+    });
+    const retained = new Set(rows);
+    for (const tr of [...tbody.children]) if (!retained.has(tr)) tr.remove();
+    let next = tbody.firstChild;
+    for (const tr of rows) {
+      if (tr === next) next = next.nextSibling;
+      else tbody.insertBefore(tr, next);
     }
   }
   showAll.onchange = () => { tile.settings.all = showAll.checked; save(); update(); };
   decodedOnly.onchange = () => { tile.settings.decodedOnly = decodedOnly.checked; save(); update(); };
   pause.onchange = () => { tile.settings.paused = pause.checked; save(); update(); };
   body.addEventListener('target-change', update);
-  let repaint = 0;
-  body.addEventListener('packet', () => {
-    if (repaint) return;
-    repaint = setTimeout(() => { repaint = 0; if (body.isConnected) update(); }, 100);
-  });
+  body.addEventListener('packet', update);
   update();
 }
 
@@ -397,17 +418,29 @@ function renderBody(body, tile, tileElement) {
     });
     bottom.addEventListener('pointermove', event => { if (event.pointerId === touchPointer) touch(event); });
     bottom.addEventListener('pointerup', release); bottom.addEventListener('pointercancel', release);
+    let frameLabelTimer = 0, latestFrame;
     const draw = event => {
       if (event.type !== 'frame' || event.instanceId !== tile.instanceId) return;
-      if (event.frame !== undefined) frameLabel.textContent = `${event.frame} f`;
-      filename.textContent = state.names.get(tile.instanceId) || 'ROM未読込';
+      if (event.frame !== undefined) {
+        latestFrame = event.frame;
+        if (!frameLabelTimer) frameLabelTimer = setTimeout(() => {
+          frameLabelTimer = 0;
+          if (body.isConnected) frameLabel.textContent = `${latestFrame} f`;
+        }, 100);
+      }
+      const name = state.names.get(tile.instanceId) || 'ROM未読込';
+      if (filename.textContent !== name) filename.textContent = name;
       for (const [canvas, pixels] of [[top, event.top], [bottom, event.bottom]]) {
         if (!pixels || pixels.length !== 256 * 192 * 4) continue;
-        canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(pixels), 256, 192), 0, 0);
+        const rgba = ArrayBuffer.isView(pixels)
+          ? new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength)
+          : new Uint8ClampedArray(pixels);
+        canvas.getContext('2d').putImageData(new ImageData(rgba, 256, 192), 0, 0);
       }
     };
     tileElement._frameListener = draw;
     body.addEventListener('target-change', () => {
+      clearTimeout(frameLabelTimer); frameLabelTimer = 0;
       tileElement._syncAudio();
       for (const canvas of [top, bottom]) canvas.getContext('2d').clearRect(0, 0, 256, 192);
       frameLabel.textContent = '—'; filename.textContent = state.names.get(tile.instanceId) || 'ROM未読込';
@@ -884,7 +917,7 @@ api.subscribe(event => {
   if (!['local-log', 'wifi-log'].includes(event.type) || !Number.isInteger(event.instanceId)) return;
   const list = state.logs[event.type]; list.push(event);
   if (list.length > 2000) list.splice(0, list.length - 2000);
-  for (const tile of workspace.querySelectorAll(`[data-type="${event.type}"]`)) tile.querySelector('.tile-body').dispatchEvent(new Event('packet'));
+  queueLogUpdate(event.type);
 });
 renderLayout();
 function ensureScreen(id) {

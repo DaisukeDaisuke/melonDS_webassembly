@@ -26,9 +26,12 @@ await esbuild.build({
 });
 const html = await readFile(join(root, 'web/index.html'), 'utf8');
 const css = await readFile(join(root, 'web/style.css'), 'utf8') + '\n' + await readFile(join(root, 'web/debugger.css'), 'utf8');
-await writeFile(join(out, 'index.html'), html.replace('<link rel="stylesheet" href="./style.css">', `<style>${css}</style>`));
-const buildId = createHash('sha256').update(await readFile(join(out, 'main.js'))).update(await readFile(join(root, 'web/dist/melonds.wasm'))).digest('hex').slice(0, 20);
-await writeFile(join(out, 'loader.js'), (await readFile(join(root, 'web/loader.js'), 'utf8')).replace('__MELONDS_BUILD_ID__', buildId));
+const loader = await readFile(join(root, 'web/loader.js'), 'utf8');
+const buildId = createHash('sha256').update(await readFile(join(out, 'main.js')))
+  .update(await readFile(join(root, 'web/dist/melonds.wasm'))).update(loader).update(html).update(css).digest('hex').slice(0, 20);
+await writeFile(join(out, 'index.html'), html.replace('<link rel="stylesheet" href="./style.css">', `<style>${css}</style>`)
+  .replace('src="./loader.js"', `src="./loader.js?v=${buildId}"`));
+await writeFile(join(out, 'loader.js'), loader.replaceAll('__MELONDS_BUILD_ID__', buildId));
 const dist = join(root, 'web/dist');
 for (const name of await readdir(dist)) {
   if (name === '.gitkeep') continue;

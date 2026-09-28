@@ -1,5 +1,6 @@
 // This file is both the page loader and the same-origin isolation service worker.
 // Build: __MELONDS_BUILD_ID__
+const buildId = '__MELONDS_BUILD_ID__';
 if (typeof window === 'undefined') {
   // Coalesce dispatcher/pthread imports in memory only. Nothing is written to
   // CacheStorage; a new service-worker build starts with an empty runtime map.
@@ -40,6 +41,9 @@ if (typeof window === 'undefined') {
 } else {
   const main = new URL('./main.js', document.currentScript.src);
   const worker = new URL('./loader.js', document.currentScript.src);
+  main.searchParams.set('v', buildId);
+  worker.searchParams.set('v', buildId);
+  globalThis.melondsBuild = buildId;
   (async () => {
     if (isSecureContext && 'serviceWorker' in navigator) {
       await navigator.serviceWorker.register(worker, { updateViaCache: 'none' });

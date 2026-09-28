@@ -29,6 +29,13 @@ struct InputEvent {
     unsigned frame;
     unsigned mask;
 };
+struct PendingInput {
+    unsigned token;
+    int kind; // 0=key edge, 1=touch
+    int x;
+    int y;
+    bool pressed;
+};
 struct Breakpoint {
     unsigned id;
     int cpu;
@@ -68,6 +75,11 @@ struct Instance {
     size_t scheduleOffset = 0;
     bool recording = false;
     bool recordingOverflow = false;
+    std::mutex inputMutex;
+    std::deque<PendingInput> pendingInput;
+    unsigned nextInputToken = 0; // inputMutex; 31-bit sequence
+    std::atomic<unsigned> completedInput {0};
+    std::atomic<bool> inputPending {false};
     std::vector<Breakpoint> breakpoints;
     unsigned nextBreakpointId = 1;
     std::mutex debugMutex;
@@ -163,6 +175,32 @@ int saveStateLocked(Instance* inst, int slot) {
     inst->states[slot].assign(data, data + file.Length());
     return static_cast<int>(inst->states[slot].size());
 }
+// The caller owns coreMutex. Live input must not make the dispatcher block
+// behind a RunFrame which may be waiting for another LocalMP participant.
+void applyPendingInput(Instance* inst) {
+    if (!inst->inputPending.load()) return;
+    std::deque<PendingInput> commands;
+    {
+        std::lock_guard<std::mutex> lock(inst->inputMutex);
+        commands.swap(inst->pendingInput);
+        inst->inputPending = false;
+    }
+    for (const auto& command : commands) {
+        if (command.kind == 0) {
+            unsigned mask = (inst->nds->KeyInput & 0x3ff) | ((inst->nds->KeyInput >> 6) & 0xc00);
+            const unsigned bit = 1u << command.x;
+            mask = command.pressed ? mask & ~bit : mask | bit;
+            inst->nds->SetKeyMask(mask);
+            if (inst->recording) {
+                if (inst->recordedInput.size() < 100000)
+                    inst->recordedInput.push_back({inst->nds->NumFrames - inst->recordStart, mask});
+                else { inst->recording = false; inst->recordingOverflow = true; }
+            }
+        } else if (command.pressed) inst->nds->TouchScreen(command.x, command.y);
+        else inst->nds->ReleaseScreen();
+        inst->completedInput.store(command.token);
+    }
+}
 void runFrames(Instance* inst) {
     using clock = std::chrono::steady_clock;
     auto next = clock::now();
@@ -176,6 +214,7 @@ void runFrames(Instance* inst) {
         }
         {
             std::unique_lock<std::mutex> guard(inst->coreMutex);
+            applyPendingInput(inst);
             if (inst->alive.load() && !inst->paused.load() && inst->nds->IsRunning()) {
                 if (inst->scheduleOffset < inst->scheduledInput.size()) {
                     const unsigned frame = inst->nds->NumFrames - inst->scheduleStart;
@@ -734,6 +773,36 @@ EMSCRIPTEN_KEEPALIVE int web_touch(int id, int x, int y, int pressed) {
     if (pressed) inst->nds->TouchScreen(x, y);
     else inst->nds->ReleaseScreen();
     return 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_input_queue(int id, int kind, int x, int y, int pressed) {
+    auto* inst = get(id);
+    if (!inst || (kind == 1 && !inst->romLoaded.load()) || (pressed != 0 && pressed != 1)) return -1;
+    if ((kind == 0 && (x < 0 || x > 11))
+        || (kind == 1 && (x < 0 || x > 255 || y < 0 || y > 191))
+        || (kind != 0 && kind != 1)) return -2;
+    unsigned token;
+    {
+        std::lock_guard<std::mutex> lock(inst->inputMutex);
+        if (inst->pendingInput.size() >= 64) return -3;
+        token = inst->nextInputToken = (inst->nextInputToken + 1) & 0x7fffffff;
+        inst->pendingInput.push_back({token, kind, x, y, pressed != 0});
+        inst->inputPending = true;
+    }
+    // Apply immediately between frames or while paused; otherwise the runner
+    // consumes the command before its next frame. Never wait here for it.
+    std::unique_lock<std::mutex> guard(inst->coreMutex, std::try_to_lock);
+    if (guard.owns_lock()) applyPendingInput(inst);
+    return static_cast<int>(token);
+}
+EMSCRIPTEN_KEEPALIVE int web_input_completed(int id) {
+    auto* inst = get(id); if (!inst) return -1;
+    if (inst->inputPending.load()) {
+        // Also covers a pause which happened inside the current frame: the
+        // interpreter releases coreMutex at its debugger suspension point.
+        std::unique_lock<std::mutex> guard(inst->coreMutex, std::try_to_lock);
+        if (guard.owns_lock()) applyPendingInput(inst);
+    }
+    return static_cast<int>(inst->completedInput.load());
 }
 EMSCRIPTEN_KEEPALIVE int web_key_mask(int id, unsigned mask) {
     auto* inst = get(id); if (!inst || mask > 0xfff) return -1;

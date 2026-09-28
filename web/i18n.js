@@ -21,7 +21,7 @@ export function installLanguageSwitcher() {
   let language='ja',serial=0;
   try{language=localStorage.getItem('melonds.language')==='en'?'en':'ja';}catch{}
   select.value=language;
-  const excluded='script,style,textarea,pre,code,.file-item,.network-detail,.file-details,.register-grid,.disassembly-table,.memory-table,.script-output';
+  const excluded='script,style,textarea,pre,code,.file-item,.network-detail,.file-details,.register-grid,.disassembly-table,.memory-table,.script-output,.packet-rows,.screen-state';
   const assign=(element,entry)=>{if(!element.id)element.id=`melonds-ui-${++serial}`;if(element.dataset.i18n!==entry.key)element.dataset.i18n=entry.key;};
   function update(root) {
     if(root.nodeType===Node.TEXT_NODE){
@@ -43,7 +43,11 @@ export function installLanguageSwitcher() {
   }
   const observer=new MutationObserver(records=>{
     const roots=new Set();
-    for(const record of records){if(record.type==='childList')record.addedNodes.forEach(node=>roots.add(node));else roots.add(record.target);}
+    for(const record of records){
+      const parent=record.target.nodeType===Node.TEXT_NODE?record.target.parentElement:record.target;
+      if(parent instanceof Element&&parent.closest(excluded))continue;
+      if(record.type==='childList')record.addedNodes.forEach(node=>roots.add(node));else roots.add(record.target);
+    }
     roots.forEach(update);
   });
   observer.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['aria-label','title','placeholder']});

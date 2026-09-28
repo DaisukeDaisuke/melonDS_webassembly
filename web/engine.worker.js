@@ -16,7 +16,11 @@ const paused = new Set();
 const visibleScreens = new Set();
 const audibleInstances = new Set();
 const lastFrames = new Map();
+const pendingFrames = new Map();
+const pendingLogBatches = new Set();
+let notificationSerial = 0;
 const debugWaiters = new Map();
+const inputWaiters = new Map();
 const cancelledOperations = new Set();
 const freezes = Array.from({ length: 16 }, () => new Map());
 const history = { 'local-log': [], 'wifi-log': [] };
@@ -70,8 +74,28 @@ function beginDebugWait(id, name, selectedCpu, address, timeoutMs = 30000) {
     debugWaiters.set(id, waiter);
   });
 }
+function submitInput(id, kind, x, y, pressed, name) {
+  const token = success(call('web_input_queue', id, kind, x, y, pressed ? 1 : 0), name);
+  return new Promise((resolve, reject) => {
+    if (!inputWaiters.has(id)) inputWaiters.set(id, []);
+    inputWaiters.get(id).push({ token, resolve, reject });
+  });
+}
+function drainInput() {
+  for (const [id, waiters] of inputWaiters) {
+    const completed = call('web_input_completed', id);
+    const remaining = [];
+    for (const waiter of waiters) {
+      if (completed < 0) waiter.reject(Error(`Input instance ${id} was removed`));
+      else if (((completed - waiter.token) & 0x7fffffff) < 0x40000000) waiter.resolve(0);
+      else remaining.push(waiter);
+    }
+    if (remaining.length) inputWaiters.set(id, remaining);
+    else inputWaiters.delete(id);
+  }
+}
 function execute(name, args) {
-  if (name === 'workspaceFlush') { drainLogs(); drainWifi(); return true; }
+  if (name === 'workspaceFlush') { drainLogs(true); drainWifi(); return true; }
   if (name === 'workspaceTransport') {
     if (args.data) {
       const result = withBytes(new Uint8Array(args.data), pointer => success(call('web_transport_import', pointer, args.data.length), name));
@@ -536,25 +560,30 @@ function execute(name, args) {
   }
   if (name === 'touch') {
     if (!Number.isInteger(args.x) || args.x < 0 || args.x > 255 || !Number.isInteger(args.y) || args.y < 0 || args.y > 191) throw RangeError('Touch coordinates must be x=0..255, y=0..191');
-    return success(call('web_touch', id, args.x, args.y, args.pressed ? 1 : 0), name);
+    return submitInput(id, 1, args.x, args.y, args.pressed, name);
   }
   if (name === 'input') {
     const bit = buttons[args.key]; if (bit === undefined) throw Error('Unknown key');
-    masks[id] = success(call('web_key_mask_get', id), name);
-    masks[id] = args.pressed ? masks[id] & ~(1 << bit) : masks[id] | (1 << bit);
-    return success(call('web_key_mask', id, masks[id]), name);
+    return submitInput(id, 0, bit, 0, args.pressed, name);
   }
   throw Error(`${name} is not implemented by the melonDS Wasm backend`);
 }
 
+function publishFrame(event, transfer = []) {
+  const frameToken = ++notificationSerial;
+  pendingFrames.set(event.instanceId, frameToken);
+  postMessage({ type: 'event', event, frameToken }, transfer);
+}
 function pollFrame(id) {
-  if (!romLoaded.has(id)) return;
+  // Keep one screen notification in flight, not an unbounded queue of old
+  // pixel buffers when the page is busy. The next poll reads the latest frame.
+  if (!romLoaded.has(id) || pendingFrames.has(id)) return;
   const number = call('web_peek_frame_number', id);
   if (number < 0 || number === lastFrames.get(id)) return;
   // A tick does not require a screen tile; persistent scripts depend on it.
   if (!visibleScreens.has(id)) {
     lastFrames.set(id, number);
-    postMessage({ type: 'event', event: { type: 'frame', instanceId: id, frame: number } });
+    publishFrame({ type: 'frame', instanceId: id, frame: number });
     return;
   }
   const length = 256 * 192 * 4;
@@ -562,13 +591,13 @@ function pollFrame(id) {
   if (!ptr) throw Error('Wasm memory exhausted while copying screen');
   try {
     if (call('web_copy_frame', id, ptr, length * 2) < 0) {
-      postMessage({ type: 'event', event: { type: 'frame', instanceId: id, frame: number } });
+      publishFrame({ type: 'frame', instanceId: id, frame: number });
       return;
     }
     const top = rgba(wasm.HEAPU8.slice(ptr, ptr + length));
     const bottom = rgba(wasm.HEAPU8.slice(ptr + length, ptr + length * 2));
     lastFrames.set(id, number);
-    postMessage({ type: 'event', event: { type: 'frame', instanceId: id, frame: number, top, bottom } }, [top.buffer, bottom.buffer]);
+    publishFrame({ type: 'frame', instanceId: id, frame: number, top, bottom }, [top.buffer, bottom.buffer]);
   } finally { call('free', ptr); }
 }
 function pollAudio(id) {
@@ -583,19 +612,24 @@ function pollAudio(id) {
     postMessage({ type: 'event', event: { type: 'audio', instanceId: id, samples } }, [samples.buffer]);
   } finally { call('free', pointer); }
 }
-function drainLogs() {
+function drainLogs(force = false) {
+  // Only the observation ring waits for the UI; LocalMP's packet/reply FIFOs
+  // keep running. Native overwritten-observation counts remain in `dropped`.
+  if (!force && pendingLogBatches.size) return;
   const count = call('web_log_count');
   if (!count) return;
   const meta = call('malloc', 32), payload = call('malloc', 0x948);
+  const events = [];
   try {
     for (let i = 0; i < count; i++) {
       const length = call('web_log_entry', i, meta, payload, 0x948);
       if (length < 0) continue;
       const view = new DataView(wasm.HEAPU8.buffer, meta, 32);
       const type = view.getUint32(12, true), src = view.getUint32(16, true);
-      emit({
+      events.push({
         type: 'local-log', instanceId: src, destination: view.getInt32(20, true),
         timestamp: `${view.getUint32(4, true)}:${view.getUint32(0, true)}`,
+        sequence: view.getUint32(8, true), rawType: type,
         packetType: ['PACKET', 'CMD', 'REPLY', 'ACK'][type & 3] || 'PACKET',
         direction: view.getUint32(24, true) ? 'RX' : 'TX',
         senderId: src, length, dropped: view.getUint32(28, true),
@@ -603,6 +637,14 @@ function drainLogs() {
       });
     }
   } finally { call('free', meta); call('free', payload); }
+  if (events.length) {
+    const entries = history['local-log'];
+    entries.push(...events);
+    if (entries.length > 2000) entries.splice(0, entries.length - 2000);
+    const logToken = ++notificationSerial;
+    pendingLogBatches.add(logToken);
+    postMessage({ type: 'events', events, logToken });
+  }
 }
 function emit(event) {
   const entries = history[event.type];
@@ -653,6 +695,11 @@ function drainDebug() {
 
 let requests = Promise.resolve();
 onmessage = ({ data }) => {
+  if (data.type === 'frame-consumed') {
+    if (pendingFrames.get(data.instanceId) === data.frameToken) pendingFrames.delete(data.instanceId);
+    return;
+  }
+  if (data.type === 'logs-consumed') { pendingLogBatches.delete(data.logToken); return; }
   if (data.type === 'screens') {
     for (const id of data.instanceIds) if (!visibleScreens.has(id)) lastFrames.set(id, -1);
     visibleScreens.clear();
@@ -687,10 +734,11 @@ onmessage = ({ data }) => {
 const pthreadURL = URL.createObjectURL(new Blob([pthreadSource], { type: 'text/javascript' }));
 wasm = await createModule({
   mainScriptUrlOrBlob: moduleURL,
-  locateFile: path => path.endsWith('.worker.js') ? pthreadURL : new URL('./melonds.wasm', moduleURL).href
+  locateFile: path => path.endsWith('.worker.js') ? pthreadURL : new URL(`./melonds.wasm${new URL(moduleURL).search}`, moduleURL).href
 });
 postMessage({ type: 'ready' });
 setInterval(() => {
+  drainInput();
   for (const id of ids) { pollFrame(id); pollAudio(id); }
   drainLogs();
   drainWifi();
