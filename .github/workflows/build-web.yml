@@ -65,7 +65,15 @@ jobs:
           npm ci --prefix web/sandbox/upstream --ignore-scripts --no-audit --no-fund
           node web/scripts/build-workers.mjs
 
+      - name: Restore cached DQ9 WFC dummy certificates
+        id: dq9-certs-cache
+        uses: actions/cache@v6
+        with:
+          path: web/dq9/certs/
+          key: dq9-wfc-certs-v1
+
       - name: Generate same-origin DQ9 WFC dummy certificates
+        if: steps.dq9-certs-cache.outputs.cache-hit != 'true'
         run: bash web/dq9/generate-certs.sh
 
       - name: Build Pages application
