@@ -38,7 +38,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: web/dist/
-          key: melonds-wasm-${{ runner.os }}-${{ steps.melonds-revision.outputs.sha }}-${{ hashFiles('webassembly/**') }}
+          key: melonds-wasm-v2-${{ runner.os }}-${{ steps.melonds-revision.outputs.sha }}-${{ hashFiles('webassembly/**') }}
 
       - name: Install Emscripten
         if: steps.melonds-cache.outputs.cache-hit != 'true'
