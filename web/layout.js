@@ -35,6 +35,7 @@ export function loadLayout(storage = globalThis.localStorage) {
     if (!Array.isArray(parsed.tiles) || !['grid', 'free'].includes(parsed.mode)) throw Error();
     return {
       mode: parsed.mode,
+      toolOrder: [...new Set([...(Array.isArray(parsed.toolOrder) ? parsed.toolOrder : []), ...TILE_TYPES])].filter(type => TILE_TYPES.includes(type)),
       tiles: parsed.tiles.slice(0, 128).filter(t => TILE_TYPES.includes(t.type) &&
         Number.isInteger(t.instanceId) && t.instanceId >= 0 && t.instanceId < 16)
         .map(t => makeTile(t.type, {
@@ -42,6 +43,7 @@ export function loadLayout(storage = globalThis.localStorage) {
           width: Math.max(240, finite(t.width, 360)),
           height: Math.max(120, finite(t.height, 300)),
           gridHeight: t.gridHeight ? Math.max(120, finite(t.gridHeight, 340)) : undefined,
+          gridSpan: t.gridSpan ? Math.max(1, Math.min(4, Math.round(finite(t.gridSpan, 1)))) : undefined,
           z: finite(t.z, 1), instanceId: t.instanceId,
           cpu: t.cpu === 'ARM7' ? 'ARM7' : 'ARM9',
           minimized: t.minimized === true,

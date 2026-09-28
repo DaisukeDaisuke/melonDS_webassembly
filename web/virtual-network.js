@@ -54,7 +54,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
     return Object.freeze({ setDlc: (game, files) => handler.setDlc(game, files), unregister });
   }
   const unsubscribe = api.subscribe(event => {
-    if (event.type !== 'wifi-log' || event.direction !== 'TX') return;
+    if (event.type !== 'wifi-log' || event.direction !== 'TX' || event.held) return;
     const server = servers.get(event.instanceId);
     if (!server) return;
     const work = (pending.get(event.instanceId) || Promise.resolve()).catch(() => {}).then(() => {

@@ -7,6 +7,7 @@ import { ResourceLimits } from './sandbox/upstream/src/resource-limits.js';
 import { normalizePersistentMcpParams } from './sandbox/upstream/src/worker-rpc-payload.js';
 import { sessionStore } from './session-store.js';
 import { systemFiles } from './system-files.js';
+import { createPacketControl, packetMethods } from './packet-control.js';
 const persistentMethods = new Set(['startPersistentScript', 'stopPersistentScript',
   'restartPersistentScript', 'listPersistentScripts', 'callPersistentScriptMcp', 'runScript']);
 const MAX_SCRIPTS = ResourceLimits.persistentScripts;
@@ -40,6 +41,7 @@ export function createScriptBackend(native) {
   const romFiles = new Map();
   let workerSources;
   const subscribers = new Set();
+  const packetControl = createPacketControl(native, event => { for (const listener of subscribers) listener(event); }, args => callMcp(args));
   let eventSerial = 0;
   const sources = async () => {
     if (!workerSources) workerSources = await import('./dist/script-workers.js');
@@ -132,7 +134,7 @@ export function createScriptBackend(native) {
   async function rpc(record, command, params) {
     if (command === 'register') {
       const kind = params.kind || params.type;
-      if (['read', 'write', 'exec'].includes(kind)) {
+      if (['read', 'write', 'exec', 'access', 'dataAbort', 'prefetchAbort', 'undefinedInstruction'].includes(kind)) {
         const cpu = params.cpu || 'ARM9';
         const bp = await native.execute('addBreakpoint', { instanceId: record.instanceId, cpu,
           type: kind === 'exec' ? 'execute' : kind, address: params.address, length: params.length || 1 });
@@ -147,6 +149,7 @@ export function createScriptBackend(native) {
       throw Error('Nested script lifecycle calls are not permitted');
     }
     const args = bindArgs(record, command, params);
+    if (packetMethods.has(command) || command === 'injectNetworkFrame') return { ok: true, value: await packetControl.execute(command, args) };
     if (command === 'setInput') {
       return { ok: true, value: await native.execute('input', {
         instanceId: record.instanceId, key: String(params.button || params.key).toUpperCase(), pressed: !!params.pressed
@@ -362,6 +365,7 @@ export function createScriptBackend(native) {
     finally { host.dispose(); }
   }
   const unsubscribe = native.subscribe(event => {
+    if (packetControl.capture(event)) return;
     if (event.type === 'frame') {
       for (const record of scripts.values()) if (record.instanceId === event.instanceId) {
         void dispatch(record, 'tick', { instanceId: event.instanceId });
@@ -384,6 +388,13 @@ export function createScriptBackend(native) {
   });
   return {
     async execute(name, args = {}) {
+      if (name === 'workspacePackets') {
+        if (args.data) { packetControl.restore(args.data); return true; }
+        return packetControl.snapshot();
+      }
+      if (name === 'workspacePacketSuspend') return packetControl.suspend();
+      if (name === 'workspacePacketResume') return packetControl.resume();
+      if (packetMethods.has(name) || name === 'injectNetworkFrame') return packetControl.execute(name, args);
       if (name === 'workspaceRoms') return [...romFiles].map(([instanceId, file]) => ({ instanceId, file, hash: romHashes.get(instanceId) }));
       if (name === 'workspaceScripts') return [...scripts.values()].map(record => ({ instanceId: record.instanceId, name: record.name, code: record.code, asyncMode: record.asyncMode, running: record.running }));
       if (name === 'waitFrames') return waitFrames(args);
@@ -453,7 +464,7 @@ export function createScriptBackend(native) {
           const ids = name === 'loadRomMany' ? args.instanceIds : [name === 'createInstance' ? result.instanceId : args.instanceId];
           for (const instanceId of ids) for (const listener of subscribers) listener({ type: 'instance-change', action: name, instanceId, romName: name.startsWith('loadRom') ? args.file?.name : undefined });
         }
-        if (name === 'destroyInstance') { romHashes.delete(args.instanceId); romFiles.delete(args.instanceId); }
+        if (name === 'destroyInstance') { romHashes.delete(args.instanceId); romFiles.delete(args.instanceId); packetControl.forget(args.instanceId); }
         if (name === 'loadRom') { romHashes.set(args.instanceId, hash); romFiles.set(args.instanceId, args.file); }
         if (name === 'loadRomMany') for (const id of args.instanceIds) { romHashes.set(id, hash); romFiles.set(id, args.file); }
         if (name === 'destroyInstance' || name === 'loadRom' || name === 'reset') capturedFrames.delete(args.instanceId);
@@ -481,6 +492,6 @@ export function createScriptBackend(native) {
     setAudioTargets(instanceIds) { native.setAudioTargets(instanceIds); },
     cancelOperation(operationId) { native.cancelOperation(operationId); },
     subscribe(listener) { subscribers.add(listener); return () => subscribers.delete(listener); },
-    close() { unsubscribe(); }
+    close() { unsubscribe(); packetControl.close(); }
   };
 }

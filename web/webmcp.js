@@ -5,6 +5,18 @@ const uint = { type: 'integer', minimum: 0, maximum: 4294967295 };
 const bytes = { type: 'array', items: { type: 'integer', minimum: 0, maximum: 255 } };
 const cpu = { type: 'string', enum: ['ARM9', 'ARM7'] };
 const toolInputs = {
+  setPacketInterceptor: [{ medium: { type: 'string', enum: ['wifi', 'local'] }, enabled: { type: 'boolean' },
+    direction: { type: 'string', enum: ['TX', 'RX', 'both'] }, handler: { type: ['object', 'null'], properties: { scriptName: { type: 'string' }, name: { type: 'string' } } },
+    pendingAction: { type: 'string', enum: ['forward', 'drop'] } }, ['medium', 'enabled']],
+  pendingPackets: [{ medium: { type: 'string', enum: ['wifi', 'local'] } }, []],
+  commitPacket: [{ packetId: { type: 'string' }, action: { type: 'string', enum: ['forward', 'drop'] }, data: bytes,
+    hex: { type: 'string' }, destinationMask: { type: 'integer', minimum: 0, maximum: 65535 },
+    destinationInstanceId: { type: 'integer', minimum: 0, maximum: 15 }, timestamp: { type: 'integer', minimum: 0 } }, ['packetId', 'action']],
+  setPacketRoutes: [{ medium: { type: 'string', enum: ['wifi', 'local'] }, destinationMask: { type: 'integer', minimum: 0, maximum: 65535 },
+    destinationInstanceId: { type: ['integer', 'null'], minimum: 0, maximum: 15 } }, ['medium']],
+  injectLocalPacket: [{ packetType: uint, data: bytes, hex: { type: 'string' }, timestamp: { type: 'integer', minimum: 0 },
+    destinationMask: { type: 'integer', minimum: 0, maximum: 65535 } }, ['packetType', 'timestamp']],
+  injectNetworkFrame: [{ data: { ...bytes, minItems: 14, maxItems: 2048 } }, ['data']],
   loadSystemFile: [{ kind: { type: 'string', enum: ['bios7', 'bios9', 'firmware'] } }, ['kind', 'fileBase64']],
   status: [{}, []], pause: [{}, []], resume: [{}, []], reset: [{}, []],
   step: [{ cpu }, []], stepOver: [{ cpu }, []], smartStep: [{ cpu }, []],
@@ -17,7 +29,7 @@ const toolInputs = {
   getRegisters: [{ cpu }, []],
   setRegister: [{ cpu, register: { type: 'string' }, value: uint }, ['register', 'value']],
   disassemble: [{ cpu, address: uint, count: { type: 'integer', minimum: 1, maximum: 256 }, thumb: { type: 'boolean' } }, ['address']],
-  addBreakpoint: [{ cpu, address: uint, type: { type: 'string', enum: ['execute', 'read', 'write'] }, length: uint }, ['address']],
+  addBreakpoint: [{ cpu, address: uint, type: { type: 'string', enum: ['execute', 'read', 'write', 'access', 'dataAbort', 'prefetchAbort', 'undefinedInstruction'] }, length: uint }, []],
   removeBreakpoint: [{ id: uint, address: uint, cpu }, []],
   listBreakpoints: [{ cpu }, []], callStack: [{ cpu, limit: uint }, []],
   loadState: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],

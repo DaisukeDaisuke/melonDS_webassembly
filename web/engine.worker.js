@@ -7,6 +7,11 @@ let wasm;
 const ids = new Set();
 const romLoaded = new Set();
 const configuredAccessPoints = new Set();
+const stateWarnings = new Map();
+function stateWarning(id, warning) {
+  if (warning) stateWarnings.set(id, warning); else stateWarnings.delete(id);
+  self.postMessage({ type: 'state-warning', instanceId: id, warning: warning || null });
+}
 const paused = new Set();
 const visibleScreens = new Set();
 const audibleInstances = new Set();
@@ -95,6 +100,27 @@ function execute(name, args) {
   }
   const { instanceId: id } = args;
   requireInstance(id);
+  if (name === 'localPacketInterceptor') return success(call('web_packet_interceptor', id, args.enabled ? 1 : 0), name);
+  if (name === 'localPacketRoutes') return success(call('web_packet_routes', id, args.destinationMask), name);
+  if (name === 'localPacketPending') {
+    const count = success(call('web_packet_pending', id), name);
+    return withBytes(new Uint8Array(28 + 4096), pointer => Array.from({ length: count }, (_, index) => {
+      const length = success(call('web_packet_entry', index, pointer, pointer + 28), name);
+      const meta = new DataView(wasm.HEAPU8.buffer, pointer, 28);
+      return { packetId: `local:${id}:${meta.getUint32(0, true)}`, nativeId: meta.getUint32(0, true), instanceId: id,
+        medium: 'local', direction: 'TX', packetType: meta.getUint32(8, true),
+        timestamp: meta.getUint32(12, true) + meta.getUint32(16, true) * 4294967296,
+        destinationMask: meta.getUint32(20, true), data: wasm.HEAPU8.slice(pointer + 28, pointer + 28 + length) };
+    }));
+  }
+  if (name === 'localPacketCommit' || name === 'injectLocalPacket') {
+    const bytes = args.data == null ? new Uint8Array() : new Uint8Array(args.data);
+    if (bytes.length > 4096) throw Error('Local packet is too large');
+    return withBytes(bytes, pointer => success(name === 'localPacketCommit'
+      ? call('web_packet_commit', id, args.nativeId, args.action === 'drop' ? 1 : 0, pointer,
+          args.data == null ? -1 : bytes.length, args.destinationMask ?? -1, args.timestamp ?? -1)
+      : call('web_packet_inject', id, args.packetType, pointer, bytes.length, args.timestamp, args.destinationMask ?? 65535), name));
+  }
   if (name === 'workspaceCapture') {
     if (!call('web_is_paused', id)) throw Error('Pause the workspace before saving');
     const system = {};
@@ -114,7 +140,7 @@ function execute(name, args) {
         return wasm.HEAPU8.slice(pointer, pointer + length);
       });
     });
-    return { system, core, slots, mask: masks[id], freezes: [...freezes[id]], configuredAccessPoint: configuredAccessPoints.has(id) };
+    return { system, core, slots, mask: masks[id], freezes: [...freezes[id]], configuredAccessPoint: configuredAccessPoints.has(id), stateWarning: stateWarnings.get(id) || null };
   }
   if (name === 'workspaceRestore') {
     const saved = args.data;
@@ -125,6 +151,7 @@ function execute(name, args) {
       withBytes(bytes, pointer => success(call('web_workspace_slot_restore', id, slot, pointer, bytes.length), name));
     }
     freezes[id] = new Map(saved.freezes); masks[id] = saved.mask;
+    stateWarning(id, saved.stateWarning);
     if (saved.configuredAccessPoint) configuredAccessPoints.add(id); else configuredAccessPoints.delete(id);
     lastFrames.set(id, -1); paused.add(id);
     return true;
@@ -179,7 +206,7 @@ function execute(name, args) {
     if (isPaused) paused.add(id); else paused.delete(id);
     return { instanceId: id, loaded: romLoaded.has(id), paused: isPaused, frames: call('web_frame_number', id),
       networkBackend: call('web_net_backend_status', id) ? 'virtual' : 'disabled',
-      romBytes: call('web_rom_info', id, 0), sharedRomInstances: call('web_rom_info', id, 1),
+      romBytes: call('web_rom_info', id, 0), sharedRomInstances: call('web_rom_info', id, 1), stateWarning: stateWarnings.get(id) || null,
       system: { bios7: !!(system & 1), bios9: !!(system & 2), firmware: !!(system & 4), nativeBios7: !!(system & 8), nativeBios9: !!(system & 16) } };
   }
   if (name === 'loadSystemFile') {
@@ -225,6 +252,9 @@ function execute(name, args) {
           const messages = { '-20': 'DeSmuMEステートの項目・サイズが一致しません', '-21': 'ステートとROMが一致しません',
             '-22': 'このDeSmuMEステートには処理途中の周辺機器があります', '-23': '未対応のDeSmuME内部形式です', '-24': 'DeSmuMEの描画データを読み込めません' };
           if (result < 0) throw Error(messages[result] || `loadState failed (${result})`);
+          const differences = call('web_state_bios_warning', id, 0);
+          stateWarning(id, differences > 0 ? { type: 'dst-bios-mismatch', cpu: 'ARM7', differences, bytes: 16384,
+            hle: !!call('web_state_bios_warning', id, 1) } : null);
           if (configuredAccessPoints.has(id)) success(call('web_prepare_virtual_ap', id), name);
           lastFrames.set(id, -1); masks[id] = call('web_key_mask_get', id); return result;
         });
@@ -606,9 +636,9 @@ function drainDebug() {
       if (call('web_debug_event_entry', index, pointer) < 0) continue;
       const view = new DataView(wasm.HEAPU8.buffer, pointer, 32);
       const id = view.getUint32(0, true), kind = view.getUint32(8, true);
-      const event = { type: kind <= 3 ? 'breakpoint' : 'debug-stop', instanceId: id,
+      const event = { type: kind <= 3 || kind >= 7 ? 'breakpoint' : 'debug-stop', instanceId: id,
         cpu: view.getUint32(4, true) === 9 ? 'ARM9' : 'ARM7',
-        kind: ['', 'execute', 'read', 'write', 'step', 'runUntil', 'pause'][kind],
+        kind: ['', 'execute', 'read', 'write', 'step', 'runUntil', 'pause', 'dataAbort', 'prefetchAbort', 'undefinedInstruction', 'access'][kind],
         breakpointId: view.getUint32(12, true), address: view.getUint32(16, true),
         pc: view.getUint32(20, true), frame: view.getUint32(24, true), dropped: view.getUint32(28, true) };
       paused.add(id);

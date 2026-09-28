@@ -57,6 +57,8 @@ struct Instance {
     std::unique_ptr<melonDS::NDS> nds;
     std::vector<melonDS::u8> save;
     unsigned systemFiles = 0;
+    int stateBiosDifferences = -1;
+    bool stateBiosHLE = false;
     std::array<std::vector<melonDS::u8>, 10> states;
     std::vector<Freeze> freezes;
     std::vector<InputEvent> recordedInput;
@@ -430,6 +432,7 @@ EMSCRIPTEN_KEEPALIVE int web_destroy(int id) {
     melonDS::Platform::WebNetClear(id);
     melonDS::Platform::WebNetSetEnabled(id, true);
     instances[id].reset();
+    localMP.ClearPacketControl(id);
     return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_load_rom(int id, const melonDS::u8* data, int length) {
@@ -861,12 +864,15 @@ EMSCRIPTEN_KEEPALIVE int web_state_import(int id, int slot, const melonDS::u8* d
         if (!inst->nds->DoSavestate(&rollback) || rollback.Error) return -2;
         rollback.Finish();
         if (rollback.Error) return -2;
+        bool hle = false;
+        const int differences = melonDS::CompareDeSmuMEARM7BIOS(*inst->nds, data, length, hle);
         int result = melonDS::ImportDeSmuMEState(*inst->nds, data, length);
         if (result == 0) {
             inst->scheduledInput.clear(); inst->scheduleOffset = 0; inst->recording = false;
             inst->stepActive = false; inst->untilActive = false; inst->skipCpu = 0; inst->watchKind = 0;
             for (auto& trace : inst->callTrace) trace.clear();
             result = saveStateLocked(inst, slot) < 0 ? -2 : 0;
+            if (result == 0) { inst->stateBiosDifferences = differences; inst->stateBiosHLE = hle; }
         }
         if (result < 0) {
             melonDS::Savestate restore(rollback.Buffer(), rollback.Length(), false);
@@ -879,8 +885,13 @@ EMSCRIPTEN_KEEPALIVE int web_state_import(int id, int slot, const melonDS::u8* d
     auto previous = std::move(inst->states[slot]);
     inst->states[slot].assign(data, data + length);
     const int result = loadStateLocked(inst, slot);
+    if (result == 0) { inst->stateBiosDifferences = -1; inst->stateBiosHLE = false; }
     if (result < 0) inst->states[slot] = std::move(previous);
     return result;
+}
+EMSCRIPTEN_KEEPALIVE int web_state_bios_warning(int id, int field) {
+    auto* inst = get(id); if (!inst) return -1;
+    return field == 1 ? static_cast<int>(inst->stateBiosHLE) : inst->stateBiosDifferences;
 }
 EMSCRIPTEN_KEEPALIVE int web_save_size(int id) {
     auto* inst = get(id); if (!inst) return -1;
@@ -999,3 +1010,4 @@ LocalMP& localMultiplayer() { return localMP; }
 }
 
 #include "workspace-native.h"
+#include "packet-control-native.h"

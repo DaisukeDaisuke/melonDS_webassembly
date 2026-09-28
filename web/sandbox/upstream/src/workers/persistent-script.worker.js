@@ -292,6 +292,7 @@ const memory = {
     registerwrite: (address, callback, options) => register("write", address, callback, options),
     registerread: (address, callback, options) => register("read", address, callback, options),
     registerexec: (address, callback, options) => register("exec", address, callback, options),
+    registeraccess: (address, callback, options) => register("access", address, callback, options),
     registerexception: (kind, callback, options) => register(kind, 0, callback, options),
     ontick: (callback, options) => register("tick", 0, callback, options)
 };

@@ -11,6 +11,9 @@ import { renderDebuggerTool } from './debugger-ui.js';
 import { renderStorageTool } from './storage-ui.js';
 import { createAudioBus } from './audio.js';
 import { decodePacket } from './packet-decode.js';
+import { installLanguageSwitcher } from './i18n.js';
+
+installLanguageSwitcher();
 
 const $ = selector => document.querySelector(selector);
 const workspace = $('#workspace');
@@ -40,7 +43,7 @@ globalThis.melondsWorkspace = createWorkspaceService({ api, backend, network: gl
         layout.tiles.push(makeTile('persistent-scripts', { instanceId: script.instanceId, settings: { code: script.code, name: script.name } }));
       }
     }
-    renderLayout(); save(); $('#rom-instance').value = saved.selectedInstance;
+    renderLayout(); renderPalette(); save(); $('#rom-instance').value = saved.selectedInstance;
     for (const instanceId of saved.audio || []) if (state.instances.includes(instanceId) && !audio.has(instanceId)) await audio.toggle(instanceId);
     if (scripts.some(script => script.running)) $('#notice').textContent = 'スクリプトのソースを復元しました。Workerは停止状態です。';
   }
@@ -426,27 +429,47 @@ function renderBody(body, tile, tileElement) {
     act('固定解除', () => api.removeMemoryFreeze(args({ address: hex(address) })));
     act('値を待つ', () => api.waitMemory(args({ address: hex(address), pattern: bytes(content) })));
   } else if (tile.type === 'registers') {
+    let refreshing = false, closed = false;
     const showRegisters = async () => {
-      const registers = await api.getRegisters(args());
+      if (refreshing || closed) return;
+      refreshing = true;
+      try {
+      const target = args(), current = await api.status(target);
+      for (const field of output.querySelectorAll('input')) field.disabled = !current.paused;
+      if (output.contains(document.activeElement) && current.paused) return;
+      const registers = await api.getRegisters(target);
+      if (closed || target.instanceId !== tile.instanceId || target.cpu !== tile.cpu) return;
       output.className = 'register-grid'; output.replaceChildren();
       for (const [name, value] of Object.entries(registers)) {
-        const item = el('div', 'register-cell');
-        item.append(el('span', '', name.toUpperCase()), el('strong', '', (value >>> 0).toString(16).padStart(8, '0')));
+        const item = el('label', 'register-cell'), field = el('input');
+        field.value = (value >>> 0).toString(16).toUpperCase().padStart(8, '0');
+        field.maxLength = 10; field.spellcheck = false; field.disabled = !current.paused;
+        field.setAttribute('aria-label', `${target.cpu} ${name.toUpperCase()} (hex)`);
+        field.onchange = () => void apply(null, async () => {
+          if (!(await api.status(target)).paused) throw Error('レジスタの編集は停止中に行ってください');
+          const value = hex(field); field.disabled = true;
+          await api.setRegister({ ...target, register: name, value });
+          field.blur(); await showRegisters();
+        });
+        field.onkeydown = event => { if (event.key === 'Enter') field.blur(); };
+        item.append(el('span', '', name.toUpperCase()), field);
         output.append(item);
       }
+      } finally { refreshing = false; }
     };
     controls.append(button('更新', showRegisters));
     tileElement._debugListener = event => { if (event.instanceId === tile.instanceId) void showRegisters().catch(errorMessage); };
-    const name = textInput(controls, 'レジスタ名', 'r0');
-    const value = textInput(controls, '値 (hex)', '0');
-    controls.append(button('設定', async () => { await api.setRegister(args({ register: name.value, value: hex(value) })); await showRegisters(); }));
+    const timer = setInterval(() => void showRegisters().catch(() => {}), 300);
+    tileElement._cleanup = () => { closed = true; clearInterval(timer); };
+    body.addEventListener('target-change', () => void showRegisters().catch(errorMessage));
+    void showRegisters().catch(errorMessage);
   } else if (tile.type === 'disassembly') {
     const address = textInput(controls, '開始アドレス (hex)', '02000000');
     act('逆アセンブル', () => api.disassemble(args({ address: hex(address), count: 16 })));
   } else if (tile.type === 'breakpoints') {
     const address = textInput(controls, 'アドレス (hex)', '02000000');
     const kind = el('select');
-    for (const value of ['execute', 'read', 'write']) kind.append(new Option(value, value));
+    for (const value of ['execute', 'read', 'write', 'access', 'dataAbort', 'prefetchAbort', 'undefinedInstruction']) kind.append(new Option(value, value));
     controls.append(kind);
     act('追加', () => api.addBreakpoint(args({ address: hex(address), type: kind.value })));
     act('削除', () => api.removeBreakpoint(args({ address: hex(address) })));
@@ -576,13 +599,39 @@ function renderTile(tile) {
   node.style.zIndex = tile.z;
   if (layout.mode === 'free') place(node, tile);
   else if (tile.gridHeight) node.style.height = `${tile.gridHeight}px`;
+  const grip = el('div', 'tile-width-grip');
+  grip.setAttribute('role', 'separator'); grip.setAttribute('aria-label', '横幅を変更'); grip.setAttribute('aria-orientation', 'vertical');
+  grip.tabIndex = 0; node.append(grip);
+  const columns = () => Math.max(1, getComputedStyle(workspace).gridTemplateColumns.split(' ').filter(Boolean).length);
+  node._gridSpan = () => {
+    if (layout.mode !== 'grid') return;
+    node.style.gridColumn = `span ${Math.max(1, Math.min(columns(), tile.gridSpan || (['wifi-log','local-log','files'].includes(tile.type) ? 2 : 1)))}`;
+  };
+  grip.onpointerdown = event => {
+    if (layout.mode !== 'grid' || event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation();
+    const start = event.clientX, count = columns(), gap = parseFloat(getComputedStyle(workspace).columnGap) || 0;
+    const unit = (workspace.clientWidth + gap) / count, width = node.getBoundingClientRect().width;
+    grip.setPointerCapture(event.pointerId); document.body.classList.add('is-column-resizing');
+    const move = e => { tile.gridSpan = Math.max(1, Math.min(count, Math.round((width + e.clientX - start + gap) / unit))); node._gridSpan(); };
+    const end = () => {
+      grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', end); grip.removeEventListener('pointercancel', end);
+      document.body.classList.remove('is-column-resizing'); save();
+    };
+    grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', end); grip.addEventListener('pointercancel', end);
+  };
+  grip.onkeydown = event => {
+    if (!['ArrowLeft','ArrowRight'].includes(event.key) || layout.mode !== 'grid') return;
+    event.preventDefault(); tile.gridSpan = Math.max(1, Math.min(columns(), (tile.gridSpan || 1) + (event.key === 'ArrowRight' ? 1 : -1))); node._gridSpan(); save();
+  };
   node.addEventListener('pointerdown', () => { tile.z = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1; node.style.zIndex = tile.z; save(); });
   node.querySelector('.tile-header').addEventListener('pointerdown', event => {
     if (layout.mode !== 'free' || event.button !== 0 || event.target.closest('button')) return;
     const startX = event.clientX, startY = event.clientY, left = tile.x, top = tile.y;
     const handle = event.currentTarget; handle.setPointerCapture(event.pointerId);
+    document.body.classList.add('is-grabbing');
     const move = e => { tile.x = Math.max(0, left + e.clientX - startX); tile.y = Math.max(0, top + e.clientY - startY); place(node, tile); };
-    const end = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end); save(); };
+    const end = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end); document.body.classList.remove('is-grabbing'); save(); };
     handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
   });
   node._resizeObserver = new ResizeObserver(() => {
@@ -599,6 +648,7 @@ function renderTile(tile) {
   node._resizeObserver.observe(node);
   renderBody(node.querySelector('.tile-body'), tile, node);
   workspace.append(node);
+  node._gridSpan();
 }
 function place(node, tile) {
   node.style.left = `${tile.x}px`; node.style.top = `${tile.y}px`;
@@ -615,14 +665,57 @@ function renderLayout() {
   updateScreenTargets();
   updateAudioTargets();
 }
-for (const type of TILE_TYPES) {
+function renderPalette() {
+  const order = layout.toolOrder = [...new Set([...(layout.toolOrder || []), ...TILE_TYPES])].filter(type => TILE_TYPES.includes(type));
+  $('#palette-tools').replaceChildren(); $('#tool-order-list').replaceChildren();
+  for (const [index, type] of order.entries()) {
   const node = $('#palette-template').content.firstElementChild.cloneNode(true);
   node.querySelector('.palette-name').textContent = LABELS[type];
   node.querySelector('.palette-icon').textContent = ({ screen: '▣', debugger: '⌁', memory: '▤', disassembly: '≡', registers: 'R', breakpoints: '◆', callstack: '↳', save: '▱', 'local-log': '↔', 'wifi-log': '◉', script: '⌘', 'persistent-scripts': '⟲', input: '＋', state: '◫', files: '▥', system: '⚙', workspace: '◫' })[type];
   node.onclick = () => addTile(type, 16 + layout.tiles.length * 24, 16 + layout.tiles.length * 24);
   node.ondragstart = event => { event.dataTransfer.setData('text/plain', type); event.dataTransfer.effectAllowed = 'copy'; };
   $('#palette-tools').append(node);
+  const item = el('div', 'tool-order-row'); item.dataset.type = type;
+  item.append(el('span', 'tool-order-grip', '⠿'), el('span', '', LABELS[type]));
+  const reorder = (source, target, after) => {
+    const next = order.filter(value => value !== source), position = next.indexOf(target);
+    if (position < 0 || source === target) return;
+    next.splice(position + (after ? 1 : 0), 0, source); layout.toolOrder = next; save(); renderPalette();
+  };
+  const clearDrag = () => { document.body.classList.remove('is-grabbing'); for (const row of $('#tool-order-list').children) row.classList.remove('moving'); };
+  item.draggable = true;
+  item.ondragstart = event => {
+    event.dataTransfer.setData('application/x-melonds-tool-order', type); event.dataTransfer.effectAllowed = 'move';
+    document.body.classList.add('is-grabbing'); item.classList.add('moving');
+  };
+  item.ondragover = event => { if (event.dataTransfer.types.includes('application/x-melonds-tool-order')) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; } };
+  item.ondrop = event => {
+    const source = event.dataTransfer.getData('application/x-melonds-tool-order'); if (!order.includes(source)) return;
+    event.preventDefault(); event.stopPropagation(); const rect = item.getBoundingClientRect(); clearDrag();
+    reorder(source, type, event.clientY > rect.top + rect.height / 2);
+  };
+  item.ondragend = clearDrag;
+  item.onpointerdown = event => {
+    if (event.pointerType === 'mouse' || event.button !== 0) return;
+    event.preventDefault(); item.setPointerCapture(event.pointerId);
+    document.body.classList.add('is-grabbing'); item.classList.add('moving');
+    let target = null, after = false;
+    const move = e => {
+      const row = document.elementFromPoint(e.clientX, e.clientY)?.closest('.tool-order-row');
+      if (!row || row === item) return;
+      target = row.dataset.type; const rect = row.getBoundingClientRect(); after = e.clientY > rect.top + rect.height / 2;
+    };
+    const end = e => {
+      document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end);
+      clearDrag(); if (target && e.type !== 'pointercancel') reorder(type, target, after);
+    };
+    document.addEventListener('pointermove', move); document.addEventListener('pointerup', end); document.addEventListener('pointercancel', end);
+  };
+  $('#tool-order-list').append(item);
+  }
 }
+renderPalette();
+new ResizeObserver(() => { for (const node of workspace.querySelectorAll('.tile')) node._gridSpan?.(); }).observe(workspace);
 workspace.ondragover = event => { if (event.dataTransfer.types.includes('text/plain')) event.preventDefault(); };
 workspace.ondrop = event => {
   const type = event.dataTransfer.getData('text/plain');

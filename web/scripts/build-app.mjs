@@ -31,6 +31,7 @@ const buildId = createHash('sha256').update(await readFile(join(out, 'main.js'))
 await writeFile(join(out, 'loader.js'), (await readFile(join(root, 'web/loader.js'), 'utf8')).replace('__MELONDS_BUILD_ID__', buildId));
 await copyFile(join(root, 'web/dist/melonds.wasm'), join(out, 'melonds.wasm'));
 await copyFile(join(root, 'LICENSE'), join(out, 'LICENSE'));
+await copyFile(join(root, 'API_REFERENCE.md'), join(out, 'API_REFERENCE.md'));
 try { await cp(join(root, 'web/dq9/certs'), join(out, 'dq9/certs'), { recursive: true }); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
 console.log('public: index.html, loader.js, main.js, melonds.wasm');

@@ -10,11 +10,11 @@ template<class T> void workspaceVector(melonDS::Savestate& state, std::vector<T>
 }
 void workspaceTransportState(melonDS::Savestate& state) {
     state.Section("WTRN");
-    unsigned version = 2, mask = 0;
+    unsigned version = 3, mask = 0;
     for (int id = 0; id < 16; ++id) if (get(id)) mask |= 1u << id;
     const unsigned expectedMask = mask;
     state.Var32(&version); state.Var32(&mask);
-    if (version != 2 || mask != expectedMask) { state.Error = true; return; }
+    if (version != 3 || mask != expectedMask) { state.Error = true; return; }
     for (auto& owner : instances) if (owner) {
         auto& inst = *owner;
         inst.nds->Wifi.DoTransportState(&state);

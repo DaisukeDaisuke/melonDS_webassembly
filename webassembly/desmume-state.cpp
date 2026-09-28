@@ -75,6 +75,28 @@ void viewport(GPU3D& g, u32 v) {
 }
 }
 
+int CompareDeSmuMEARM7BIOS(const NDS& n, const u8* data, size_t length, bool& hle) {
+    hle = false;
+    if (length < 32 || std::memcmp(data, "DeSmuME SState", 13)) return -1;
+    bool valid = true; Bytes source{data, length, &valid};
+    if (source.w(16) != 12 || source.w(28) != 0xffffffff) return -1;
+    Reader reader{source.part(32, length - 32)};
+    while (valid && reader.pos < reader.bytes.n) {
+        const u32 id = reader.w(); if (id == 0xffffffff) break;
+        const auto chunk = reader.take(reader.w());
+        if (!valid) return -1;
+        if (id != 60) continue;
+        Tags fields(chunk); const auto it = fields.fields.find("M7BI");
+        if (!valid || it == fields.fields.end() || it->second.n != n.GetARM7BIOS().size()) return -1;
+        const auto& bios = it->second;
+        hle = bios.w(0) == 0xeafffffeu && bios.w(4) == 0xeafffffeu && bios.w(8) == 0xeafffffeu;
+        int differences = 0;
+        for (size_t i = 0; i < bios.n; ++i) differences += bios.p[i] != n.GetARM7BIOS()[i];
+        return differences;
+    }
+    return -1;
+}
+
 int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
     bool valid = true;
     Bytes source{data, length, &valid};
@@ -202,7 +224,12 @@ int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
     // executable FreeBIOS with this placeholder (SWI would loop at 0x08).
     const bool hlePlaceholder = arm7Bios.w(0) == 0xeafffffeu
         && arm7Bios.w(4) == 0xeafffffeu && arm7Bios.w(8) == 0xeafffffeu;
-    if (!hlePlaceholder) arm7Bios.copy(n.ARM7BIOS.data(), n.ARM7BIOS.size());
+    if (!hlePlaceholder) {
+        std::array<u8, ARM7BIOSSize> image;
+        arm7Bios.copy(image.data(), image.size());
+        if (!valid) return -20;
+        n.SetARM7BIOS(image);
+    }
     if (save.n) n.SetNDSSave(save.p, save.n);
     memory.get("VMEM").copy(n.GPU.Palette, sizeof(n.GPU.Palette));
     memory.get("OAMS").copy(n.GPU.OAM, sizeof(n.GPU.OAM));

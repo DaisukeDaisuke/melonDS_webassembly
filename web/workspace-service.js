@@ -10,9 +10,11 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
     const statuses = await Promise.all((await api.listInstances()).map(instanceId => api.status({ instanceId })));
     await Promise.all(statuses.map(({ instanceId }) => api.pause({ instanceId })));
     await backend.execute('workspaceFlush'); await network.suspend();
+    await backend.execute('workspacePacketSuspend');
     return statuses;
   };
   const resume = async statuses => {
+    await backend.execute('workspacePacketResume');
     network.resume();
     await Promise.all(statuses.filter(status => status.loaded && !status.paused).map(({ instanceId }) => api.resume({ instanceId })));
   };
@@ -35,15 +37,15 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
           instances.push({ ...captured, paused: status.paused, rom: index, data });
         }
         await backend.execute('workspaceFlush'); await network.suspend();
-        const result = { version: 1, createdAt: new Date().toISOString(), instances, roms,
+        const result = { version: 3, createdAt: new Date().toISOString(), instances, roms,
           transport: await backend.execute('workspaceTransport'), network: network.snapshot(),
-          files: await network.files.snapshot(), scripts: await backend.execute('workspaceScripts'), ui: readUI() };
+          files: await network.files.snapshot(), scripts: await backend.execute('workspaceScripts'), packetControl: await backend.execute('workspacePackets'), ui: readUI() };
         return encodeWorkspace(result);
       } finally { await resume(statuses); }
     }),
     import: file => exclusive(async () => {
       const saved = await decodeWorkspace(file);
-      if (saved.version !== 1 || !Array.isArray(saved.instances) || saved.instances.length > 16 || !Array.isArray(saved.roms)
+      if (saved.version !== 3 || !Array.isArray(saved.instances) || saved.instances.length > 16 || !Array.isArray(saved.roms)
         || !saved.transport || !Array.isArray(saved.files) || !saved.ui) throw Error('Invalid .mel workspace');
       const ids = new Set();
       for (const record of saved.instances) {
@@ -69,6 +71,7 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
         }
         await network.files.restore(saved.files);
         await backend.execute('workspaceTransport', { data: saved.transport });
+        await backend.execute('workspacePackets', { data: saved.packetControl });
         network.restore(saved.network);
         await restoreUI(saved.ui, saved.scripts || []);
         await resume(saved.instances);
@@ -76,7 +79,7 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
       } catch (error) {
         // Do not run a partially restored workspace after an import error.
         await Promise.all((await api.listInstances()).map(instanceId => api.pause({ instanceId })));
-        network.resume(); throw error;
+        await backend.execute('workspacePacketResume'); network.resume(); throw error;
       }
     })
   });

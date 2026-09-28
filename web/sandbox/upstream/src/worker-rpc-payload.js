@@ -32,6 +32,9 @@ export const WorkerByteLimits = Object.freeze({
 });
 
 const BYTE_COMMAND_SCHEMAS = new Map([
+    ...["commitPacket", "injectLocalPacket", "injectNetworkFrame"].map(command => [command, Object.freeze({
+        maxBytes: 64 * 1024, specialArrays: Object.freeze({ data: Object.freeze({ kind: "byte", maxItems: 4096 }) })
+    })]),
     ["injectBytes", Object.freeze({
         maxBytes: 3 * 1024 * 1024 + 64 * 1024,
         specialArrays: Object.freeze({ bytes: Object.freeze({ kind: "byte", maxItems: 1024 * 1024 }) }),

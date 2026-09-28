@@ -80,7 +80,7 @@ export function renderDebuggerTool(body, tile, node, { api, save, onError, jump 
   } else if (tile.type === 'breakpoints') {
     addressInput = input('停止アドレス (hex)', '02000000');
     lengthInput = input('監視バイト数', '1', '4em'); lengthInput.type = 'number'; lengthInput.min = 1; lengthInput.max = 4096;
-    for (const [label, type] of [['実行', 'execute'], ['読取', 'read'], ['書込', 'write']]) action(label, async () => { await api.addBreakpoint(args({ address: parse(addressInput.value), length: Number(lengthInput.value), type })); await refresh(); });
+    for (const [label, type] of [['実行', 'execute'], ['読取', 'read'], ['書込', 'write'], ['読書込', 'access'], ['Data abort', 'dataAbort'], ['Prefetch abort', 'prefetchAbort'], ['未定義命令', 'undefinedInstruction']]) action(label, async () => { await api.addBreakpoint(args({ address: parse(addressInput.value), length: Number(lengthInput.value), type })); await refresh(); });
     action('更新', refresh);
   } else {
     action('更新', refresh);
@@ -125,7 +125,7 @@ export function renderDebuggerTool(body, tile, node, { api, save, onError, jump 
         const [t, rows] = table(['CPU', '条件', 'アドレス', '長さ', '']);
         for (const bp of points) {
           const r = E('tr'); r.dataset.breakpointId = bp.id;
-          for (const value of [bp.cpu, { execute: '実行', read: '読取', write: '書込' }[bp.type], H(bp.address), `${bp.length} B`]) r.append(E('td', '', value));
+          for (const value of [bp.cpu, { execute: '実行', read: '読取', write: '書込', access: '読書込', dataAbort: 'Data abort', prefetchAbort: 'Prefetch abort', undefinedInstruction: '未定義命令' }[bp.type], ['dataAbort', 'prefetchAbort', 'undefinedInstruction'].includes(bp.type) ? '—' : H(bp.address), `${bp.length} B`]) r.append(E('td', '', value));
           const cell = E('td'), remove = E('button', '', '削除'); remove.onclick = () => void api.removeBreakpoint({ ...target, id: bp.id }).then(refresh).catch(report); cell.append(remove); r.append(cell); rows.append(r);
         }
         view.replaceChildren(t); status.textContent = `${points.length} 件のブレイクポイント`;
