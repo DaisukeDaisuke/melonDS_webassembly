@@ -7,7 +7,7 @@ if (typeof window === 'undefined') {
   function request(request) {
     const url = new URL(request.url);
     const reusable = request.method === 'GET' && url.origin === self.location.origin
-      && /\/(main\.js|melonds\.wasm)$/.test(url.pathname);
+      && /\/(main\.js|melonds\.js|melonds\.wasm)$/.test(url.pathname);
     if (!reusable) return fetch(request);
     if (request.cache === 'reload' || request.cache === 'no-store') runtime.delete(url.href);
     if (!runtime.has(url.href)) {
