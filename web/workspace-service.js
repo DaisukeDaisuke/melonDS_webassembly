@@ -45,7 +45,7 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
     }),
     import: file => exclusive(async () => {
       const saved = await decodeWorkspace(file);
-      if (saved.version !== 3 || !Array.isArray(saved.instances) || saved.instances.length > 16 || !Array.isArray(saved.roms)
+      if (![3, 4].includes(saved.version) || !Array.isArray(saved.instances) || saved.instances.length > 16 || !Array.isArray(saved.roms)
         || !saved.transport || !Array.isArray(saved.files) || !saved.ui) throw Error('Invalid .mel workspace');
       const ids = new Set();
       for (const record of saved.instances) {
