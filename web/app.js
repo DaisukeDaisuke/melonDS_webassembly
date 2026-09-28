@@ -984,10 +984,11 @@ async function ensureBulkTargets() {
   for (let id = 0; state.instances.length < count && id < MAX_INSTANCES; id++) await ensureInstance(id);
   return [...state.instances].sort((a, b) => a - b).slice(0, count);
 }
-function currentBulkTargets() {
-  const targets = [...state.instances].sort((a, b) => a - b);
-  if (!targets.length) throw Error('インスタンスがありません');
-  return targets;
+async function ensureHeaderBulkTargets() {
+  const end = Number($('#bulk-end-instance').value);
+  if (!Number.isInteger(end) || end < 0 || end >= MAX_INSTANCES) throw Error('一括読込範囲が不正です');
+  for (let id = 0; id <= end; id++) await ensureInstance(id);
+  return Array.from({ length: end + 1 }, (_, id) => id);
 }
 async function loadRomTargets(targets, file) {
   if (loadDelayMs() === 0 && targets.length > 1) {
@@ -1044,14 +1045,14 @@ $('#rom-file').onchange = event => {
 $('#bulk-rom-file').onchange = event => {
   const input = event.currentTarget, file = input.files?.[0]; if (!file) return;
   void apply($('#bulk-rom'), async () => {
-    await loadRomTargets(currentBulkTargets(), file);
+    await loadRomTargets(await ensureHeaderBulkTargets(), file);
     refreshSummary();
   }).finally(() => { input.value = ''; });
 };
 $('#bulk-state-file').onchange = event => {
   const input = event.currentTarget, file = input.files?.[0]; if (!file) return;
   void apply($('#bulk-state'), async () => {
-    await loadStateTargets(currentBulkTargets(), file);
+    await loadStateTargets(await ensureHeaderBulkTargets(), file);
   }).finally(() => { input.value = ''; });
 };
 api.subscribe(event => {

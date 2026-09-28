@@ -16,6 +16,12 @@
       <input id="bulk-rom-file" type="file" accept=".nds,.srl" aria-label="一括ROMロード" hidden>
       <button id="bulk-state" type="button">DST / MLロード</button>
       <input id="bulk-state-file" type="file" accept=".dst,.ml" aria-label="DST / MLロード" hidden>
+      <select id="bulk-end-instance" aria-label="一括読込範囲">
+        <option value="0">0〜0</option><option value="1" selected>0〜1</option><option value="2">0〜2</option><option value="3">0〜3</option>
+        <option value="4">0〜4</option><option value="5">0〜5</option><option value="6">0〜6</option><option value="7">0〜7</option>
+        <option value="8">0〜8</option><option value="9">0〜9</option><option value="10">0〜10</option><option value="11">0〜11</option>
+        <option value="12">0〜12</option><option value="13">0〜13</option><option value="14">0〜14</option><option value="15">0〜15</option>
+      </select>
       <label class="load-delay">読込遅延 <select id="load-delay" aria-label="読込遅延"><option value="0">遅延なし</option><option value="50">50 ms</option><option value="100">100 ms</option><option value="200">200 ms</option><option value="300">300 ms</option><option value="400">400 ms</option><option value="500">500 ms</option></select></label>
       <select id="ui-language" aria-label="Language"><option value="ja">日本語</option><option value="en">English</option></select>
       <a class="button" href="./API.md" target="_blank" rel="noopener">API</a>

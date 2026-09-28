@@ -1,7 +1,7 @@
 export const UI_STRINGS = [
 ['DSTのBIOS不一致','DST BIOS mismatch'],
 ['了解','OK'],['一括ROMロード','Load ROM on all'],['DST / MLロード','Load DST / ML'],['読込遅延','Load delay'],['遅延なし','No delay'],
-['DST / MLの一括読込先には先にROMを読み込んでください','Load a ROM on every DST / ML target first'],['インスタンスがありません','No instances'],
+['一括読込範囲','Bulk load range'],['一括読込範囲が不正です','Invalid bulk load range'],['DST / MLの一括読込先には先にROMを読み込んでください','Load a ROM on every DST / ML target first'],['インスタンスがありません','No instances'],
 ['CSV対象','CSV packets'],['CSV出力','Export CSV'],['一時停止','Pause'],['ステップ','Step'],['到達PC (hex)','Target PC (hex)'],['指定位置まで','Run to target'],['状態取得','Get status'],['呼出履歴','Call history'],['待つフレーム数','Frames to wait'],['フレーム待機','Wait frames'],
 ['開始アドレス (hex)','Start address (hex)'],['長さ (byte)','Length (bytes)'],['読み取り','Read'],['書き込みhex','Write hex'],['書き込み','Write'],['固定','Freeze'],['固定解除','Unfreeze'],['値を待つ','Wait for value'],
 ['入力履歴','Input history'],['記録を再生','Play recording'],['連打するボタン','Repeat button'],['押下フレーム数','Pressed frames'],['解放フレーム数','Released frames'],['連打','Repeat'],['連打を停止','Stop repeat'],
