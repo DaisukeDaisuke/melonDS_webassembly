@@ -18,6 +18,12 @@ void workspaceTransportState(melonDS::Savestate& state) {
     for (auto& owner : instances) if (owner) {
         auto& inst = *owner;
         inst.nds->Wifi.DoTransportState(&state);
+        {
+            std::lock_guard<std::mutex> videoLock(inst.videoMutex);
+            state.VarBool(&inst.videoValid);
+            state.VarArray(inst.video.data(), inst.video.size());
+        }
+        workspaceVector(state, inst.save, 8 * 1024 * 1024);
         state.Var32(&inst.systemFiles);
         auto& firmware = inst.nds->GetFirmware();
         unsigned length = firmware.Length(); state.Var32(&length);

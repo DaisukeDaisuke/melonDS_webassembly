@@ -1,10 +1,31 @@
 // This file is both the page loader and the same-origin isolation service worker.
+// Build: __MELONDS_BUILD_ID__
 if (typeof window === 'undefined') {
+  // Coalesce dispatcher/pthread imports in memory only. Nothing is written to
+  // CacheStorage; a new service-worker build starts with an empty runtime map.
+  const runtime = new Map();
+  function request(request) {
+    const url = new URL(request.url);
+    const reusable = request.method === 'GET' && url.origin === self.location.origin
+      && /\/(main\.js|melonds\.wasm)$/.test(url.pathname);
+    if (!reusable) return fetch(request);
+    if (request.cache === 'reload' || request.cache === 'no-store') runtime.delete(url.href);
+    if (!runtime.has(url.href)) {
+      if (runtime.size >= 4) runtime.delete(runtime.keys().next().value);
+      const pending = fetch(request).then(async response => {
+        if (!response.ok) { runtime.delete(url.href); return response; }
+        return new Response(await response.arrayBuffer(), { status: response.status,
+          statusText: response.statusText, headers: response.headers });
+      }).catch(error => { runtime.delete(url.href); throw error; });
+      runtime.set(url.href, pending);
+    }
+    return runtime.get(url.href).then(response => response.clone());
+  }
   self.addEventListener('install', () => self.skipWaiting());
   self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
   self.addEventListener('fetch', event => {
     if (event.request.cache === 'only-if-cached' && event.request.mode !== 'same-origin') return;
-    event.respondWith(fetch(event.request).then(response => {
+    event.respondWith(request(event.request).then(response => {
       if (!response.ok || response.type === 'opaque') return response;
       const headers = new Headers(response.headers);
       headers.set('Cross-Origin-Opener-Policy', 'same-origin');
@@ -17,13 +38,14 @@ if (typeof window === 'undefined') {
   const main = new URL('./main.js', document.currentScript.src);
   const worker = new URL('./loader.js', document.currentScript.src);
   (async () => {
-    if (!crossOriginIsolated) {
-      if (!isSecureContext || !('serviceWorker' in navigator)) throw Error('HTTPSで開いてください。');
+    if (isSecureContext && 'serviceWorker' in navigator) {
       await navigator.serviceWorker.register(worker, { updateViaCache: 'none' });
       await navigator.serviceWorker.ready;
-      if (!navigator.serviceWorker.controller) {
-        await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
-      }
+      if (!navigator.serviceWorker.controller) await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
+    }
+    if (!crossOriginIsolated) {
+      if (!isSecureContext || !('serviceWorker' in navigator)) throw Error('HTTPSで開いてください。');
+
       if (sessionStorage.getItem('melonds-isolation-reload') === location.href) throw Error('SharedArrayBufferを有効にできません。別ウィンドウで開き直してください。');
       sessionStorage.setItem('melonds-isolation-reload', location.href);
       location.reload();

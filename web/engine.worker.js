@@ -68,7 +68,11 @@ function beginDebugWait(id, name, selectedCpu, address, timeoutMs = 30000) {
 function execute(name, args) {
   if (name === 'workspaceFlush') { drainLogs(); drainWifi(); return true; }
   if (name === 'workspaceTransport') {
-    if (args.data) return withBytes(new Uint8Array(args.data), pointer => success(call('web_transport_import', pointer, args.data.length), name));
+    if (args.data) {
+      const result = withBytes(new Uint8Array(args.data), pointer => success(call('web_transport_import', pointer, args.data.length), name));
+      for (const id of instances) lastFrames.set(id, -1);
+      return result;
+    }
     const length = success(call('web_transport_capture'), name), pointer = call('web_transport_pointer');
     return wasm.HEAPU8.slice(pointer, pointer + length);
   }

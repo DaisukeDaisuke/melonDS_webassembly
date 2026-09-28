@@ -30,7 +30,9 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
             if (!romIndex.has(rom.hash)) { romIndex.set(rom.hash, roms.length); roms.push(rom.file); }
             index = romIndex.get(rom.hash);
           }
-          instances.push({ ...status, rom: index, data: await backend.execute('workspaceCapture', { instanceId: status.instanceId }) });
+          const data = await backend.execute('workspaceCapture', { instanceId: status.instanceId });
+          const captured = await api.status({ instanceId: status.instanceId });
+          instances.push({ ...captured, paused: status.paused, rom: index, data });
         }
         await backend.execute('workspaceFlush'); await network.suspend();
         const result = { version: 1, createdAt: new Date().toISOString(), instances, roms,

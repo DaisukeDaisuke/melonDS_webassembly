@@ -603,7 +603,7 @@ function renderLayout() {
 for (const type of TILE_TYPES) {
   const node = $('#palette-template').content.firstElementChild.cloneNode(true);
   node.querySelector('.palette-name').textContent = LABELS[type];
-  node.querySelector('.palette-icon').textContent = ({ screen: '▣', debugger: '⌁', memory: '▤', disassembly: '≡', registers: 'R', breakpoints: '◆', callstack: '↳', save: '▱', 'local-log': '↔', 'wifi-log': '◉', script: '⌘', 'persistent-scripts': '⟲', input: '＋', state: '◫', files: '▥' })[type];
+  node.querySelector('.palette-icon').textContent = ({ screen: '▣', debugger: '⌁', memory: '▤', disassembly: '≡', registers: 'R', breakpoints: '◆', callstack: '↳', save: '▱', 'local-log': '↔', 'wifi-log': '◉', script: '⌘', 'persistent-scripts': '⟲', input: '＋', state: '◫', files: '▥', system: '⚙', workspace: '◫' })[type];
   node.onclick = () => addTile(type, 16 + layout.tiles.length * 24, 16 + layout.tiles.length * 24);
   node.ondragstart = event => { event.dataTransfer.setData('text/plain', type); event.dataTransfer.effectAllowed = 'copy'; };
   $('#palette-tools').append(node);
