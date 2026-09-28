@@ -1,0 +1,4 @@
+[nitro_leaf]
+# Keep the unextended leaf format used by the reference certificate generator.
+subjectKeyIdentifier = none
+authorityKeyIdentifier = none

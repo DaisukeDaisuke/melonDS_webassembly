@@ -6,6 +6,7 @@ export async function startEngine(moduleURL) {
 let wasm;
 const ids = new Set();
 const romLoaded = new Set();
+const configuredAccessPoints = new Set();
 const paused = new Set();
 const visibleScreens = new Set();
 const audibleInstances = new Set();
@@ -97,12 +98,16 @@ function execute(name, args) {
   if (name === 'setNetworkBackend') {
     if (!['virtual', 'disabled'].includes(args.backend)) throw Error('backend must be virtual or disabled');
     success(call('web_net_backend', id, args.backend === 'virtual' ? 1 : 0), name);
-    if (args.backend === 'virtual' && args.configureAccessPoint) success(call('web_prepare_virtual_ap', id), name);
+    if (args.backend === 'virtual' && args.configureAccessPoint) {
+      success(call('web_prepare_virtual_ap', id), name); configuredAccessPoints.add(id);
+    }
+    if (args.backend === 'disabled') configuredAccessPoints.delete(id);
     return { instanceId: id, backend: args.backend };
   }
   if (name === 'destroyInstance') {
     debugWaiters.get(id)?.reject(Error('Instance destroyed during debugger operation'));
     success(call('web_destroy', id), name); ids.delete(id); romLoaded.delete(id); paused.delete(id);
+    configuredAccessPoints.delete(id);
     freezes[id].clear(); lastFrames.delete(id); masks[id] = 0xfff;
     return { instanceId: id };
   }
@@ -165,11 +170,13 @@ function execute(name, args) {
           const messages = { '-20': 'DeSmuMEステートの項目・サイズが一致しません', '-21': 'ステートとROMが一致しません',
             '-22': 'このDeSmuMEステートには処理途中の周辺機器があります', '-23': '未対応のDeSmuME内部形式です', '-24': 'DeSmuMEの描画データを読み込めません' };
           if (result < 0) throw Error(messages[result] || `loadState failed (${result})`);
+          if (configuredAccessPoints.has(id)) success(call('web_prepare_virtual_ap', id), name);
           lastFrames.set(id, -1); masks[id] = call('web_key_mask_get', id); return result;
         });
         })();
       }
       const result = success(call('web_load_state', id, slot), name);
+      if (configuredAccessPoints.has(id)) success(call('web_prepare_virtual_ap', id), name);
       lastFrames.set(id, -1); masks[id] = call('web_key_mask_get', id); return result;
     }
     const size = success(call('web_state_size', id, slot), name);

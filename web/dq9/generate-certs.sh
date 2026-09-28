@@ -24,5 +24,6 @@ openssl req -new -key "$output/server.key" -out "$temporary/server.csr" \
   -subj '/C=US/ST=Washington/L=Redmond/O=Nintendo of America Inc./OU=Nintendo Wifi Network/CN=*.*.*/emailAddress=ca@noa.nintendo.com'
 openssl x509 -req -in "$temporary/server.csr" -CA "$output/nwc.crt" \
   -CAkey "$temporary/nwc.key" -CAcreateserial -CAserial "$temporary/nwc.srl" \
-  -out "$output/server.crt" -days 3650 -sha1
+  -out "$output/server.crt" -days 3650 -sha1 \
+  -extfile "$root/openssl-nitro.cnf" -extensions nitro_leaf
 cat "$output/server.crt" "$output/nwc.crt" > "$output/server_with_chain.crt"

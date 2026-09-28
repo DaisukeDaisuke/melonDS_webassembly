@@ -1,0 +1,125 @@
+このファイルは、人間からのレビュー結果である。気が付いた場合修正を試みよ
+
+- インスタンスまたはromをクリックしないと、romを同時に読み込めないの廃止する、エミュレータ画面から直接インスタンス生成までできるようにする
+- dstを読み込むと、おそらくarm7の復元に失敗しており、arm9関連は動くがarm7は完全にクラッシュしてるっぽい挙動を治す(多分治ってる)
+- タッチパネル、キー入力バッファがおそらくが1台分しか想定されておらず、タッチパネルを触るとfpsがめちゃくちゃ落ちる
+- 同時に音声を出力すると、1個は正常だがほかの音声サンプリングがぶっ壊れる。途切れ途切れになったり、サンプリングバッファがおかしくなるのを治す
+- SetAccessPointSSIDをしたせいで、デフォルトのメロンds ssidが壊れて接続できなくなってるのを治す(多分治ってる)
+- 接続先dnsをメロンds側から設定で指定する。
+- dstを読み込むと、一瞬音声サンプリングがおかしいの治す
+- 画面の状態や、通信状況をAIにdstと配置をまとめて渡せる.melファイルを作り、これのエクスポート、インポートに対応する。dlcコンテンツなども引き継ぐ、停止状況なども正確に対応する
+- 負荷がかかると、引き伸ばされたように音が正確でなくなるバグを治す。この場合fpsをすこし落とすしかない
+- wfcでClientHello、ServerHelloDoneが通ったのに接続が続行しないのは、多くの場合証明書不整合なのでなおす、証明書は、繋げて送らないといけない。生成した証明書だけ送っても拒否される。C:\Users\owner\Documents\tunnelworkspace\melonDS_webassembly\web\dq9\certs\server_with_chain.crtを送らないと拒否されるのは仕様。
+
+アクションなおす
+
+Run bash webassembly/build.sh
+configure: cmake -S /home/runner/work/melonDS_webassembly/melonDS_webassembly/webassembly -B /home/runner/work/melonDS_webassembly/melonDS_webassembly/webassembly/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=/usr/share/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/node
+-- Using CCache to speed up compilation
+Enabling GDB stub
+CMake Warning (deprecated) at /home/runner/work/melonDS_webassembly/melonDS_webassembly/melonDS_w/src/teakra/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+CMake Warning (policy) at /home/runner/work/melonDS_webassembly/melonDS_webassembly/melonDS_w/src/teakra/CMakeLists.txt:22 (set):
+  Policy CMP0218 is not set: The CMAKE_WARN_DEPRECATED and
+  CMAKE_ERROR_DEPRECATED variables are ignored.  Run "cmake --help-policy
+  CMP0218" for policy details.  Use the cmake_policy command to set the
+  policy and suppress this warning.
+This warning is for project developers.  Use -Wno-author or -Wno-policy to
+suppress it.
+
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Looking for shm_open in rt
+-- Looking for shm_open in rt - found
+-- Configuring done (15.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/runner/work/melonDS_webassembly/melonDS_webassembly/webassembly/build
+[  2%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/apbp.cpp.o
+[  2%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/ahbm.cpp.o
+[  3%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/btdmp.cpp.o
+[  4%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/disassembler.cpp.o
+[  5%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/dma.cpp.o
+[  6%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/timer.cpp.o
+[  7%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/memory_interface.cpp.o
+[  8%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/mmio.cpp.o
+[ 10%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/parser.cpp.o
+[ 11%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/processor.cpp.o
+[ 12%] Building CXX object melonDS/src/teakra/src/CMakeFiles/teakra.dir/teakra.cpp.o
+[ 13%] Linking CXX static library libteakra.a
+[ 13%] Built target teakra
+[ 14%] Building CXX object melonDS/src/CMakeFiles/core.dir/ARCodeFile.cpp.o
+[ 15%] Building CXX object melonDS/src/CMakeFiles/core.dir/ARDatabaseDAT.cpp.o
+[ 16%] Building CXX object melonDS/src/CMakeFiles/core.dir/AREngine.cpp.o
+[ 17%] Building CXX object melonDS/src/CMakeFiles/core.dir/ARM.cpp.o
+[ 75%] Building CXX object melonDS/src/CMakeFiles/core.dir/NDSCart/CartRetailIR.cpp.o
+[ 76%] Building CXX object melonDS/src/CMakeFiles/core.dir/NDSCart/CartRetailBT.cpp.o
+[ 77%] Building CXX object melonDS/src/CMakeFiles/core.dir/NDSCart/CartSD.cpp.o
+[ 78%] Building CXX object melonDS/src/CMakeFiles/core.dir/NDSCart/CartHomebrew.cpp.o
+[ 79%] Building CXX object melonDS/src/CMakeFiles/core.dir/NDSCart/CartR4.cpp.o
+[ 80%] Building C object melonDS/src/CMakeFiles/core.dir/fatfs/ff.c.o
+[ 82%] Building C object melonDS/src/CMakeFiles/core.dir/fatfs/ffsystem.c.o
+[ 83%] Building C object melonDS/src/CMakeFiles/core.dir/fatfs/ffunicode.c.o
+[ 84%] Building C object melonDS/src/CMakeFiles/core.dir/sha1/sha1.c.o
+[ 85%] Building C object melonDS/src/CMakeFiles/core.dir/tiny-AES-c/aes.c.o
+[ 86%] Building C object melonDS/src/CMakeFiles/core.dir/xxhash/xxhash.c.o
+[ 87%] Building C object melonDS/src/CMakeFiles/core.dir/blip-buf/blip_buf.c.o
+[ 88%] Building CXX object melonDS/src/CMakeFiles/core.dir/debug/GdbStub.cpp.o
+[ 89%] Building CXX object melonDS/src/CMakeFiles/core.dir/debug/GdbProto.cpp.o
+[ 91%] Building CXX object melonDS/src/CMakeFiles/core.dir/debug/GdbCmds.cpp.o
+[ 92%] Linking CXX static library libcore.a
+[ 92%] Built target core
+[ 93%] Building CXX object CMakeFiles/melonds.dir/port.cpp.o
+[ 94%] Building CXX object CMakeFiles/melonds.dir/platform.cpp.o
+[ 95%] Building CXX object CMakeFiles/melonds.dir/desmume-state.cpp.o
+[ 96%] Building CXX object CMakeFiles/melonds.dir/disassembler-port.cpp.o
+[ 97%] Building CXX object CMakeFiles/melonds.dir/vendor/desmume-source/Disassembler.cpp.o
+[ 98%] Building CXX object CMakeFiles/melonds.dir/home/runner/work/melonDS_webassembly/melonDS_webassembly/melonDS_w/src/net/LocalMP.cpp.o
+[100%] Linking CXX executable /home/runner/work/melonDS_webassembly/melonDS_webassembly/web/dist/melonds.js
+em++: warning: -pthread + ALLOW_MEMORY_GROWTH may run non-wasm code slowly, see https://github.com/WebAssembly/design/issues/1271 [-Wpthreads-mem-growth]
+[100%] Built target melonds
+
+added 14 packages in 1s
+npm warn install-scripts 1 package has install scripts not yet covered by allowScripts:
+npm warn install-scripts   esbuild@0.25.6 (postinstall: node install.js)
+npm warn install-scripts
+npm warn install-scripts Run `npm install-scripts ls` to review, or `npm install-scripts approve <pkg>` to allow.
+Certificate request self-signature ok
+subject=C=US, ST=Washington, L=Redmond, O=Nintendo of America Inc., OU=Nintendo Wifi Network, CN=*.*.*, emailAddress=ca@noa.nintendo.com
+✘ [ERROR] Could not resolve "./dist/melonds.worker.js"
+
+    web/engine.worker.js:2:26:
+      2 │ import pthreadSource from './dist/melonds.worker.js';
+        ╵                           ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1 error
+/home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:1465
+  let error = new Error(text);
+              ^
+
+Error: Build failed with 1 error:
+web/engine.worker.js:2:26: ERROR: Could not resolve "./dist/melonds.worker.js"
+    at failureErrorWithLog (/home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:1465:15)
+    at /home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:924:25
+    at runOnEndCallbacks (/home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:1305:45)
+    at buildResponseToResult (/home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:922:7)
+    at /home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:949:16
+    at responseCallbacks.<computed> (/home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:601:9)
+    at handleIncomingPacket (/home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:656:12)
+    at Socket.readFromStdout (/home/runner/work/melonDS_webassembly/melonDS_webassembly/web/sandbox/upstream/node_modules/esbuild/lib/main.js:579:7)
+    at Socket.emit (node:events:514:28)
+    at addChunk (node:internal/streams/readable:568:12) {
+  errors: [Getter/Setter],
+  warnings: [Getter/Setter]
+}
+
+Node.js v24.21.0
+Error: Process completed with exit code 1.
