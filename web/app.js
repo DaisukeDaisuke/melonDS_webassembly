@@ -21,6 +21,7 @@ const layout = loadLayout();
 const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], names: new Map(), logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
+const stateWarnings = new Map();
 const audio = createAudioBus({ onTargets: ids => backend.setAudioTargets(ids), onChange: updateAudioTargets });
 globalThis.melondsAudio = Object.freeze({ stats: () => audio.stats() });
 globalThis.melonds = api;
@@ -319,12 +320,26 @@ function renderBody(body, tile, tileElement) {
     const targets = () => [...new Set([tile.instanceId, tile.settings.inputLink].filter(id => Number.isInteger(id) && state.instances.includes(id)))];
     footer.append(filename, button('キー入力', () => stack.focus({ preventScroll: true })), linkInput, toggleAudio);
     stack.append(top, bottom);
-    body.append(toolbar, stack, footer);
+    const warning = el('div', 'state-warning'); warning.hidden = true; warning.setAttribute('role', 'alert');
+    tileElement._stateWarning = info => {
+      warning.hidden = !info;
+      warning.replaceChildren();
+      if (info) warning.append(el('strong', '', 'DSTのBIOS不一致'), el('span', '', ` ARM7 · ${info.differences} / ${info.bytes} bytes${info.hle ? ' · DeSmuME HLE' : ''}`));
+    };
+    const refreshWarning = () => {
+      tileElement._stateWarning(stateWarnings.get(tile.instanceId));
+      const instanceId = tile.instanceId;
+      if (state.instances.includes(instanceId)) void api.status({ instanceId }).then(value => {
+        if (tile.instanceId === instanceId && warning.isConnected) tileElement._stateWarning(value.stateWarning);
+      }).catch(() => {});
+    };
+    body.append(toolbar, warning, stack, footer); refreshWarning();
+    body.addEventListener('target-change', refreshWarning);
     const fit = new ResizeObserver(() => {
-      const available = Math.max(1, body.clientHeight - toolbar.offsetHeight - footer.offsetHeight - 8);
+      const available = Math.max(1, body.clientHeight - toolbar.offsetHeight - footer.offsetHeight - warning.offsetHeight - 8);
       stack.style.width = `${Math.max(1, Math.min(body.clientWidth - 8, available * 256 / 388))}px`;
     });
-    fit.observe(body); fit.observe(toolbar); fit.observe(footer);
+    fit.observe(body); fit.observe(toolbar); fit.observe(footer); fit.observe(warning);
     tileElement._cleanup = () => fit.disconnect();
     const held = new Map();
     const keymap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', KeyX: 'A', KeyZ: 'B', KeyS: 'X', KeyA: 'Y', KeyQ: 'L', KeyW: 'R', Enter: 'START', ShiftLeft: 'SELECT', ShiftRight: 'SELECT' };
@@ -766,6 +781,14 @@ $('#rom-file').onchange = event => {
   }).finally(() => { input.value = ''; });
 };
 api.subscribe(event => {
+  if (event.type === 'state-warning') {
+    if (event.warning) stateWarnings.set(event.instanceId, event.warning); else stateWarnings.delete(event.instanceId);
+    for (const node of workspace.querySelectorAll('.tile')) {
+      const model = layout.tiles.find(tile => tile.id === node.dataset.id);
+      if (model?.instanceId === event.instanceId) { node._stateWarning?.(event.warning); node._systemListener?.(event); }
+    }
+    return;
+  }
   if (!event || typeof event !== 'object') return;
   if (event.type === 'instance-change') {
     if (event.action === 'destroyInstance') {

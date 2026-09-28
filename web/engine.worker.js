@@ -85,7 +85,7 @@ function execute(name, args) {
   if (name === 'createInstance') {
     const id = args.instanceId ?? Array.from({ length: 16 }, (_, n) => n).find(n => !ids.has(n));
     if (!Number.isInteger(id) || id < 0 || id > 15 || ids.has(id)) throw Error('No free instance slot');
-    success(call('web_create', id), name); ids.add(id); paused.add(id); freezes[id].clear();
+    success(call('web_create', id), name); ids.add(id); paused.add(id); freezes[id].clear(); stateWarnings.delete(id);
     lastFrames.set(id, call('web_peek_frame_number', id)); return { instanceId: id };
   }
   if (name === 'loadRomMany') {
@@ -94,6 +94,7 @@ function execute(name, args) {
     return withBytes(rom, pointer => args.instanceIds.map(id => {
       debugWaiters.get(id)?.reject(Error('ROM replaced during debugger operation'));
       success(call('web_load_rom', id, pointer, rom.length), name);
+      stateWarning(id, null);
       romLoaded.add(id); paused.delete(id); freezes[id].clear(); masks[id] = 0xfff;
       lastFrames.set(id, call('web_peek_frame_number', id)); return { instanceId: id };
     }));
@@ -179,10 +180,12 @@ function execute(name, args) {
     debugWaiters.get(id)?.reject(Error('Instance destroyed during debugger operation'));
     success(call('web_destroy', id), name); ids.delete(id); romLoaded.delete(id); paused.delete(id);
     configuredAccessPoints.delete(id);
+    stateWarnings.delete(id);
     freezes[id].clear(); lastFrames.delete(id); masks[id] = 0xfff;
     return { instanceId: id };
   }
   if (name === 'loadRom') {
+    stateWarning(id, null);
     debugWaiters.get(id)?.reject(Error('ROM replaced during debugger operation'));
     const rom = new Uint8Array(args.bytes);
     return withBytes(rom, pointer => {
