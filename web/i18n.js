@@ -3,6 +3,8 @@ import { UI_STRINGS } from './ui-strings.js';
 // script, memory, filename or packet data. IDs/data-i18n identify bound elements.
 const byJa = new Map(UI_STRINGS.map(([ja,en], i) => [ja, {key:`text-${i}`,ja,en}]));
 const byEn = new Map([...byJa.values()].map(entry => [entry.en,entry]));
+const textBindings = new WeakMap();
+const attributeBindings = new WeakMap();
 function lookup(value) {
   const trimmed=value.trim(), entry=byJa.get(trimmed)||byEn.get(trimmed);
   if(entry)return {...entry,prefix:value.slice(0,value.indexOf(trimmed)),suffix:value.slice(value.indexOf(trimmed)+trimmed.length)};
@@ -14,6 +16,10 @@ function lookup(value) {
   if(m)return {key:'input-link',ja:`${m[1]} と連動`,en:`Link with ${m[1]}`};
   m=trimmed.match(/^(BIOS[79]|Firmware): (実機|Native|読込済み|Loaded|内蔵|Built-in)$/);
   if(m){const s=byJa.get(m[2])||byEn.get(m[2]);return {key:'system-state',ja:`${m[1]}: ${s.ja}`,en:`${m[1]}: ${s.en}`};}
+  m=trimmed.match(/^インスタンス(\d+)のROM$/)||trimmed.match(/^ROM for instance (\d+)$/);
+  if(m)return {key:'instance-rom',ja:`インスタンス${m[1]}のROM`,en:`ROM for instance ${m[1]}`};
+  m=trimmed.match(/^(DST|SAV)をこのエミュレーターに読み込む$/)||trimmed.match(/^Load (DST|SAV) into this emulator$/);
+  if(m)return {key:'instance-file-load',ja:`${m[1]}をこのエミュレーターに読み込む`,en:`Load ${m[1]} into this emulator`};
   return null;
 }
 export function installLanguageSwitcher() {
@@ -27,7 +33,12 @@ export function installLanguageSwitcher() {
     if(root.nodeType===Node.TEXT_NODE){
       const parent=root.parentElement;
       if(!parent||parent.closest(excluded))return;
-      const entry=lookup(root.nodeValue);if(!entry)return;
+      const trimmed=root.nodeValue.trim();
+      let entry=textBindings.get(root);
+      if(!entry||![entry.ja,entry.en].includes(trimmed)){
+        entry=lookup(root.nodeValue);if(!entry){textBindings.delete(root);return;}
+        textBindings.set(root,entry);
+      }
       assign(parent,entry);
       const value=`${entry.prefix||''}${entry[language]}${entry.suffix||''}`;
       if(root.nodeValue!==value)root.nodeValue=value;
@@ -36,7 +47,12 @@ export function installLanguageSwitcher() {
     if(!(root instanceof Element)||root.matches(excluded))return;
     for(const name of ['aria-label','title','placeholder']){
       const value=root.getAttribute(name);if(!value)continue;
-      const entry=lookup(value);if(!entry)continue;
+      let bindings=attributeBindings.get(root);if(!bindings){bindings=new Map();attributeBindings.set(root,bindings);}
+      let entry=bindings.get(name);
+      if(!entry||![entry.ja,entry.en].includes(value.trim())){
+        entry=lookup(value);if(!entry){bindings.delete(name);continue;}
+        bindings.set(name,entry);
+      }
       assign(root,entry);if(value!==entry[language])root.setAttribute(name,entry[language]);
     }
     for(const child of root.childNodes)update(child);

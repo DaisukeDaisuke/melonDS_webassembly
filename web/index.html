@@ -12,6 +12,11 @@
     <div class="brand"><svg width="22" height="26" viewBox="0 0 22 26" fill="none" aria-hidden="true"><rect x="2" y="1" width="18" height="11" rx="2" stroke="currentColor"/><rect x="2" y="14" width="18" height="11" rx="2" stroke="currentColor"/><path d="M6 18v4m-2-2h4m8-1h.01m-2 2h.01" stroke="currentColor" stroke-linecap="round"/></svg><strong>melonDS</strong><span>Web</span></div>
     <div class="top-actions">
       <span id="backend-status" class="backend-status" role="status">起動中…</span>
+      <button id="bulk-rom" type="button">一括ROMロード</button>
+      <input id="bulk-rom-file" type="file" accept=".nds,.srl" aria-label="一括ROMロード" hidden>
+      <button id="bulk-state" type="button">DST / MLロード</button>
+      <input id="bulk-state-file" type="file" accept=".dst,.ml" aria-label="DST / MLロード" hidden>
+      <label class="load-delay">読込遅延 <select id="load-delay" aria-label="読込遅延"><option value="0">遅延なし</option><option value="50">50 ms</option><option value="100">100 ms</option><option value="200">200 ms</option><option value="300">300 ms</option><option value="400">400 ms</option><option value="500">500 ms</option></select></label>
       <select id="ui-language" aria-label="Language"><option value="ja">日本語</option><option value="en">English</option></select>
       <a class="button" href="./API.md" target="_blank" rel="noopener">API</a>
       <button id="create-instance" type="button">＋ インスタンス</button>

@@ -3,7 +3,7 @@ import { systemFiles, systemKind } from './system-files.js';
 import { createWorkspaceService } from './workspace-service.js';
 import { createWasmBackend } from './backend.js';
 import { createScriptBackend } from './script-service.js';
-import { loadLayout, saveLayout, makeTile, TILE_TYPES, LABELS } from './layout.js';
+import { loadLayout, saveLayout, makeTile, migrateWorkspaceLayout, TILE_TYPES, LABELS } from './layout.js';
 import { registerWebMcp } from './webmcp.js';
 import { createVirtualNetwork } from './virtual-network.js';
 import { renderFileExplorer } from './file-explorer.js';
@@ -42,6 +42,12 @@ function queueLogUpdate(type) {
   }, 100);
 }
 const stateWarnings = new Map();
+let stateWarningsDismissed = false;
+function dismissStateWarnings() {
+  stateWarningsDismissed = true;
+  stateWarnings.clear();
+  for (const node of workspace.querySelectorAll('.tile')) node._stateWarning?.(null);
+}
 const audio = createAudioBus({ onTargets: ids => backend.setAudioTargets(ids), onChange: updateAudioTargets });
 globalThis.melondsAudio = Object.freeze({ stats: () => audio.stats() });
 globalThis.melonds = api;
@@ -57,7 +63,7 @@ globalThis.melondsWorkspace = createWorkspaceService({ api, backend, network: gl
   readUI: () => ({ layout: structuredClone(layout), names: [...state.names], logs: structuredClone(state.logs),
     selectedInstance: $('#rom-instance').value, audio: audio.stats().instances.map(record => record.instanceId) }),
   async restoreUI(saved, scripts) {
-    Object.assign(layout, saved.layout);
+    Object.assign(layout, migrateWorkspaceLayout(saved.layout));
     state.names = new Map(saved.names); state.logs = saved.logs;
     for (const script of scripts) {
       if (!layout.tiles.some(tile => tile.type === 'persistent-scripts' && tile.instanceId === script.instanceId && tile.settings.code === script.code)) {
@@ -172,6 +178,14 @@ function download(data, name, type = 'application/octet-stream') {
   const link = document.createElement('a');
   link.href = url; link.download = name; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+function loadDelayMs() {
+  const value = Number($('#load-delay')?.value || 0);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+async function waitForLoadDelay(index, startedAt) {
+  const remaining = index * loadDelayMs() - (performance.now() - startedAt);
+  if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
 }
 function csvField(value) {
   const text = String(value ?? '');
@@ -432,15 +446,22 @@ function renderBody(body, tile, tileElement) {
     stack.append(top, bottom);
     const warning = el('div', 'state-warning'); warning.hidden = true; warning.setAttribute('role', 'alert');
     tileElement._stateWarning = info => {
-      warning.hidden = !info;
+      warning.hidden = !info || stateWarningsDismissed;
       warning.replaceChildren();
-      if (info) warning.append(el('strong', '', 'DSTのBIOS不一致'), el('span', '', ` ARM7 · ${info.differences} / ${info.bytes} bytes${info.hle ? ' · DeSmuME HLE' : ''}`));
+      if (info && !stateWarningsDismissed) {
+        const message = el('span', 'state-warning-message');
+        message.append(el('strong', '', 'DSTのBIOS不一致'), document.createTextNode(` ARM7 · ${info.differences} / ${info.bytes} bytes${info.hle ? ' · DeSmuME HLE' : ''}`));
+        const dismiss = el('button', 'state-warning-dismiss', '了解');
+        dismiss.type = 'button'; dismiss.onclick = dismissStateWarnings;
+        warning.append(message, dismiss);
+      }
     };
     const refreshWarning = () => {
+      if (stateWarningsDismissed) { tileElement._stateWarning(null); return; }
       tileElement._stateWarning(stateWarnings.get(tile.instanceId));
       const instanceId = tile.instanceId;
       if (state.instances.includes(instanceId)) void api.status({ instanceId }).then(value => {
-        if (tile.instanceId === instanceId && warning.isConnected) tileElement._stateWarning(value.stateWarning);
+        if (!stateWarningsDismissed && tile.instanceId === instanceId && warning.isConnected) tileElement._stateWarning(value.stateWarning);
       }).catch(() => {});
     };
     body.append(toolbar, warning, stack, footer); refreshWarning();
@@ -953,6 +974,44 @@ async function ensureInstance(id) {
   if (!state.instances.includes(id)) state.instances.push(id);
   refreshSummary(); return id;
 }
+function requestedInstanceCount() {
+  const count = Number($('#instance-count').value);
+  if (!Number.isInteger(count) || count < 1 || count > MAX_INSTANCES) throw Error('台数は1〜16で指定してください');
+  return count;
+}
+async function ensureBulkTargets() {
+  const count = requestedInstanceCount();
+  for (let id = 0; state.instances.length < count && id < MAX_INSTANCES; id++) await ensureInstance(id);
+  return [...state.instances].sort((a, b) => a - b).slice(0, count);
+}
+function currentBulkTargets() {
+  const targets = [...state.instances].sort((a, b) => a - b);
+  if (!targets.length) throw Error('インスタンスがありません');
+  return targets;
+}
+async function loadRomTargets(targets, file) {
+  if (loadDelayMs() === 0 && targets.length > 1) {
+    await api.loadRomMany({ instanceIds: targets, file });
+  } else {
+    const startedAt = performance.now();
+    await Promise.all(targets.map(async (instanceId, index) => {
+      await waitForLoadDelay(index, startedAt);
+      await api.loadRom({ instanceId, file });
+    }));
+  }
+  for (const instanceId of targets) { state.names.set(instanceId, file.name); ensureScreen(instanceId); }
+}
+async function loadStateTargets(targets, file) {
+  const statuses = await Promise.all(targets.map(instanceId => api.status({ instanceId })));
+  if (statuses.some(status => !status.loaded)) throw Error('DST / MLの一括読込先には先にROMを読み込んでください');
+  const startedAt = performance.now();
+  await Promise.all(targets.map(async (instanceId, index) => {
+    await waitForLoadDelay(index, startedAt);
+    audio.flush(instanceId);
+    await api.loadState({ instanceId, file });
+    for (const item of workspace.querySelectorAll('.tile')) item._debugListener?.({ type: 'debug-stop', instanceId });
+  }));
+}
 $('#create-instance').onclick = event => apply(event.currentTarget, async () => {
   const result = await api.createInstance({});
   const id = typeof result === 'number' ? result : result?.instanceId;
@@ -963,6 +1022,8 @@ $('#create-instance').onclick = event => apply(event.currentTarget, async () => 
   if (!layout.tiles.some(tile => tile.type === 'screen' && tile.instanceId === id)) addTile('screen', 16 + id * 24, 16 + id * 24);
 });
 $('#open-rom').onclick = () => $('#rom-file').click();
+$('#bulk-rom').onclick = () => $('#bulk-rom-file').click();
+$('#bulk-state').onclick = () => $('#bulk-state-file').click();
 
 $('#rom-target').onchange = () => { $('#instance-count-label').hidden = $('#rom-target').value !== 'all'; };
 $('#rom-target').onchange();
@@ -971,25 +1032,32 @@ $('#rom-file').onchange = event => {
   if (!file) return;
   void apply(null, async () => {
     if ($('#rom-target').value === 'all') {
-      const count = Number($('#instance-count').value);
-      if (!Number.isInteger(count) || count < 1 || count > MAX_INSTANCES) throw Error('台数は1〜16で指定してください');
-      for (let id = 0; state.instances.length < count && id < MAX_INSTANCES; id++) await ensureInstance(id);
-      const targets = [...state.instances].sort((a, b) => a - b).slice(0, count);
-      await api.loadRomMany({ instanceIds: targets, file });
-      for (const id of targets) { state.names.set(id, file.name); ensureScreen(id); }
+      await loadRomTargets(await ensureBulkTargets(), file);
     } else {
       const id = Number($('#rom-instance').value);
       await ensureInstance(id);
-      await api.loadRom({ instanceId: id, file });
-      state.names.set(id, file.name);
-      ensureScreen(id);
+      await loadRomTargets([id], file);
     }
     refreshSummary();
   }).finally(() => { input.value = ''; });
 };
+$('#bulk-rom-file').onchange = event => {
+  const input = event.currentTarget, file = input.files?.[0]; if (!file) return;
+  void apply($('#bulk-rom'), async () => {
+    await loadRomTargets(currentBulkTargets(), file);
+    refreshSummary();
+  }).finally(() => { input.value = ''; });
+};
+$('#bulk-state-file').onchange = event => {
+  const input = event.currentTarget, file = input.files?.[0]; if (!file) return;
+  void apply($('#bulk-state'), async () => {
+    await loadStateTargets(currentBulkTargets(), file);
+  }).finally(() => { input.value = ''; });
+};
 api.subscribe(event => {
   if (event.type === 'state-warning') {
-    if (event.warning) stateWarnings.set(event.instanceId, event.warning); else stateWarnings.delete(event.instanceId);
+    if (event.warning) { stateWarningsDismissed = false; stateWarnings.set(event.instanceId, event.warning); }
+    else stateWarnings.delete(event.instanceId);
     for (const node of workspace.querySelectorAll('.tile')) {
       const model = layout.tiles.find(tile => tile.id === node.dataset.id);
       if (model?.instanceId === event.instanceId) { node._stateWarning?.(event.warning); node._systemListener?.(event); }
