@@ -1,6 +1,7 @@
 #pragma once
 #include "Platform.h"
 #include <array>
+namespace melonDS { class Savestate; }
 
 namespace melonDS::Platform {
 struct WebNetFrame {
@@ -15,4 +16,6 @@ int WebNetDrain(WebNetFrame* out, int capacity, u32* dropped);
 void WebNetClear(int instanceId);
 int WebNetSetEnabled(int instanceId, bool enabled);
 int WebNetGetEnabled(int instanceId);
+void WebNetDoTransportState(Savestate* state);
+void WebSemaphoreState(Savestate* state, Semaphore* semaphore);
 }

@@ -66,6 +66,12 @@ function beginDebugWait(id, name, selectedCpu, address, timeoutMs = 30000) {
   });
 }
 function execute(name, args) {
+  if (name === 'workspaceFlush') { drainLogs(); drainWifi(); return true; }
+  if (name === 'workspaceTransport') {
+    if (args.data) return withBytes(new Uint8Array(args.data), pointer => success(call('web_transport_import', pointer, args.data.length), name));
+    const length = success(call('web_transport_capture'), name), pointer = call('web_transport_pointer');
+    return wasm.HEAPU8.slice(pointer, pointer + length);
+  }
   if (name === 'listInstances') return [...ids].sort((a, b) => a - b);
   if (name === 'createInstance') {
     const id = args.instanceId ?? Array.from({ length: 16 }, (_, n) => n).find(n => !ids.has(n));
@@ -85,6 +91,40 @@ function execute(name, args) {
   }
   const { instanceId: id } = args;
   requireInstance(id);
+  if (name === 'workspaceCapture') {
+    if (!call('web_is_paused', id)) throw Error('Pause the workspace before saving');
+    const system = {};
+    for (const [kind, value] of [['bios7', 7], ['bios9', 9], ['firmware', 0]]) {
+      const length = success(call('web_system_size', id, value), name), pointer = call('web_system_pointer', id, value);
+      system[kind] = wasm.HEAPU8.slice(pointer, pointer + length);
+    }
+    let core = null;
+    if (romLoaded.has(id)) {
+      const length = success(call('web_workspace_state_capture', id), name), pointer = call('web_workspace_state_pointer');
+      core = wasm.HEAPU8.slice(pointer, pointer + length);
+    }
+    const slots = Array.from({ length: 10 }, (_, slot) => {
+      const length = success(call('web_state_size', id, slot), name);
+      return withBytes(new Uint8Array(length), pointer => {
+        if (length) success(call('web_state_export', id, slot, pointer, length), name);
+        return wasm.HEAPU8.slice(pointer, pointer + length);
+      });
+    });
+    return { system, core, slots, mask: masks[id], freezes: [...freezes[id]], configuredAccessPoint: configuredAccessPoints.has(id) };
+  }
+  if (name === 'workspaceRestore') {
+    const saved = args.data;
+    if (!call('web_is_paused', id)) throw Error('Pause the workspace before restoring');
+    if (saved.core) withBytes(new Uint8Array(saved.core), pointer => success(call('web_state_import', id, 0, pointer, saved.core.length), name));
+    for (let slot = 0; slot < 10; slot++) {
+      const bytes = new Uint8Array(saved.slots[slot]);
+      withBytes(bytes, pointer => success(call('web_workspace_slot_restore', id, slot, pointer, bytes.length), name));
+    }
+    freezes[id] = new Map(saved.freezes); masks[id] = saved.mask;
+    if (saved.configuredAccessPoint) configuredAccessPoints.add(id); else configuredAccessPoints.delete(id);
+    lastFrames.set(id, -1); paused.add(id);
+    return true;
+  }
   if (name === 'localCommLog' || name === 'wifiLog') {
     const type = name === 'localCommLog' ? 'local-log' : 'wifi-log';
     return history[type].filter(entry => entry.instanceId === id || entry.destination === id)
@@ -131,10 +171,21 @@ function execute(name, args) {
   }
   if (name === 'status') {
     const isPaused = success(call('web_is_paused', id), name) !== 0;
+    const system = success(call('web_system_status', id), name);
     if (isPaused) paused.add(id); else paused.delete(id);
     return { instanceId: id, loaded: romLoaded.has(id), paused: isPaused, frames: call('web_frame_number', id),
       networkBackend: call('web_net_backend_status', id) ? 'virtual' : 'disabled',
-      romBytes: call('web_rom_info', id, 0), sharedRomInstances: call('web_rom_info', id, 1) };
+      romBytes: call('web_rom_info', id, 0), sharedRomInstances: call('web_rom_info', id, 1),
+      system: { bios7: !!(system & 1), bios9: !!(system & 2), firmware: !!(system & 4), nativeBios7: !!(system & 8), nativeBios9: !!(system & 16) } };
+  }
+  if (name === 'loadSystemFile') {
+    const kind = { bios7: 7, bios9: 9, firmware: 0 }[args.kind];
+    const bytes = new Uint8Array(args.bytes || []);
+    if (kind === undefined) throw Error('kind must be bios7, bios9 or firmware');
+    return withBytes(bytes, pointer => {
+      success(call('web_system_import', id, kind, pointer, bytes.length), name);
+      return { instanceId: id, kind: args.kind, bytes: bytes.length };
+    });
   }
   if (['saveState', 'loadState', 'exportState'].includes(name)) {
     if (!romLoaded.has(id)) throw Error('Load a ROM first');

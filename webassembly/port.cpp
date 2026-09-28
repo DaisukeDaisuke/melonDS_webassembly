@@ -56,6 +56,7 @@ struct Instance {
     int id;
     std::unique_ptr<melonDS::NDS> nds;
     std::vector<melonDS::u8> save;
+    unsigned systemFiles = 0;
     std::array<std::vector<melonDS::u8>, 10> states;
     std::vector<Freeze> freezes;
     std::vector<InputEvent> recordedInput;
@@ -375,6 +376,36 @@ EMSCRIPTEN_KEEPALIVE int web_create(int id) {
     instances[id] = std::move(instance);
     instances[id]->runner = std::thread(runFrames, instances[id].get());
     return id;
+}
+EMSCRIPTEN_KEEPALIVE int web_system_import(int id, int kind, const melonDS::u8* data, int length) {
+    auto* inst = get(id);
+    if (!inst || !data) return -1;
+    if ((kind == 7 && length != melonDS::ARM7BIOSSize) ||
+        (kind == 9 && length != melonDS::ARM9BIOSSize) ||
+        (kind == 0 && length != 0x20000 && length != 0x40000 && length != 0x80000) ||
+        (kind != 0 && kind != 7 && kind != 9)) return -2;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (kind == 7) {
+        std::array<melonDS::u8, melonDS::ARM7BIOSSize> image;
+        std::memcpy(image.data(), data, image.size());
+        inst->nds->SetARM7BIOS(image); inst->systemFiles |= 1;
+    } else if (kind == 9) {
+        std::array<melonDS::u8, melonDS::ARM9BIOSSize> image;
+        std::memcpy(image.data(), data, image.size());
+        inst->nds->SetARM9BIOS(image); inst->systemFiles |= 2;
+    } else {
+        melonDS::Firmware image(data, length);
+        image.GetHeader().MacAddr[5] = static_cast<melonDS::u8>(image.GetHeader().MacAddr[5] + id);
+        image.UpdateChecksums();
+        inst->nds->SetFirmware(std::move(image)); inst->systemFiles |= 4;
+    }
+    return 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_system_status(int id) {
+    auto* inst = get(id); if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return inst->systemFiles | (inst->nds->IsLoadedARM7BIOSKnownNative() ? 8 : 0)
+        | (inst->nds->IsLoadedARM9BIOSKnownNative() ? 16 : 0);
 }
 EMSCRIPTEN_KEEPALIVE int web_destroy(int id) {
     auto* inst = get(id);
@@ -955,3 +986,5 @@ void saveNDSToInstance(const u8* data, u32 length, void* userdata) {
 }
 LocalMP& localMultiplayer() { return localMP; }
 }
+
+#include "workspace-native.h"

@@ -1,0 +1,11 @@
+
+また、wifiウィザードはワイヤレスシャークのように内容(デコード済みは1つのフレームにする)を見れれば、幸せになるとおもうよ
+
+あと、開くたびに
+https://organic-fishstick-wrjpjx79qjwc5qgr-8789.app.github.dev/main.jsにdosしてるので、サービスワーカー側でランタイムキャッシュ(キャッシュストレージには突っ込まない)したほうがいいと思うよ
+
+あとこのごみを消さないと接続できない(おそらくC:\Users\owner\Documents\tunnelworkspace\melonDS_webassembly\dq9_micro_dwc_server_emulator.cpp-main\.github\workflows\windows-msbuild.ymlのdummy-certs-linuxと違う方法でビルドしてるため、完全一致を目指す)
+Bag Attributes
+    localKeyID: 4B 93 7D 4E 81 DE 11 57 4B 92 63 86 DD 5F 76 8A A2 3B F1 77
+subject=C=US, ST=Washington, L=Redmond, O=Nintendo of America Inc., CN=Wii NWC Prod 1, emailAddress=ca@noa.nintendo.com
+issuer=C=US, ST=Washington, O=Nintendo of America Inc, OU=NOA, CN=Nintendo CA, emailAddress=ca@noa.nintendo.com

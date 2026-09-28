@@ -19,7 +19,10 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
   const serverMac = Uint8Array.from(mac);
   const connections = new Map();
   let retransmitTimer;
+  let frozenAt = null;
+  const emissions = new Set();
   function tick() {
+    if (frozenAt !== null) return;
     const now = Date.now();
     for (const [key, connection] of connections) {
       if (now - connection.lastSeen > 120000 || connection.inflight?.retries >= 8) {
@@ -30,7 +33,8 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
       if (connection.inflight && now - connection.inflight.sentAt > 500) {
         connection.inflight.sentAt = now;
         connection.inflight.retries++;
-        Promise.resolve(emitFrame(connection.inflight.frame)).catch(error => console.error('Virtual TCP retry failed', error));
+        const emission = Promise.resolve(emitFrame(connection.inflight.frame)).catch(error => console.error('Virtual TCP retry failed', error));
+        emissions.add(emission); emission.finally(() => emissions.delete(emission));
       }
     }
     if (!connections.size) { clearInterval(retransmitTimer); retransmitTimer = null; }
@@ -73,7 +77,8 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
       return null;
     }
     if (connection.position < connection.output.length) {
-      const bytes = connection.output.subarray(connection.position, connection.position + 1200);
+      const bytes = connection.output.subarray(connection.position, connection.position + Math.min(connection.mss, connection.window));
+      if (!bytes.length) return null;
       const frame = packet(connection, 0x18, bytes);
       connection.seq = (connection.seq + bytes.length) >>> 0;
       connection.position += bytes.length;
@@ -144,7 +149,17 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
         return existing.synReply;
       }
       if (connections.size >= 64 && !connections.has(key)) return null;
-      const connection = { mac: frame.slice(6, 12), clientIp: clientIp.slice(), clientPort, port,
+      let mss = 536;
+      for (let cursor = offset + 20; cursor < offset + header;) {
+        const kind = frame[cursor];
+        if (kind === 0) break;
+        if (kind === 1) { cursor++; continue; }
+        const size = frame[cursor + 1];
+        if (size < 2 || cursor + size > offset + header) break;
+        if (kind === 2 && size === 4) mss = Math.max(1, Math.min(1460, read16(frame, cursor + 2)));
+        cursor += size;
+      }
+      const connection = { mac: frame.slice(6, 12), clientIp: clientIp.slice(), clientPort, port, mss, window: read16(frame, offset + 14),
         lastSeen: Date.now(), initialClientSeq: clientSeq,
         ack: (clientSeq + 1) >>> 0, seq: (Math.random() * 0xffffffff) >>> 0,
         ipId: 1, inflight: null, request: new Uint8Array(), output: null, queue: [],
@@ -161,6 +176,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     }
     const connection = connections.get(key);
     if (!connection) return null;
+    connection.window = read16(frame, offset + 14);
     connection.lastSeen = Date.now();
     const acknowledged = read32(frame, offset + 8);
     if (connection.inflight && acknowledged === connection.inflight.end) connection.inflight = null;
@@ -208,5 +224,38 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     return replies.length === 0 ? null : replies;
   }
   onFrame.close = () => { connections.clear(); clearInterval(retransmitTimer); retransmitTimer = null; };
+  onFrame.suspend = () => { if (frozenAt === null) frozenAt = Date.now(); };
+  onFrame.settle = () => Promise.all([...emissions]);
+  onFrame.resume = () => {
+    if (frozenAt === null) return;
+    const elapsed = Date.now() - frozenAt;
+    for (const connection of connections.values()) {
+      connection.lastSeen += elapsed;
+      if (connection.inflight) connection.inflight.sentAt += elapsed;
+    }
+    frozenAt = null;
+  };
+  onFrame.snapshot = () => {
+    const now = frozenAt ?? Date.now();
+    return [...connections].map(([key, connection]) => {
+      const { secure, lastSeen, inflight, ...fields } = connection;
+      return { key, ...structuredClone(fields), age: now - lastSeen,
+        inflight: inflight ? { ...structuredClone(inflight), sentAt: undefined, age: now - inflight.sentAt } : null,
+        secure: secure?.snapshot() || null };
+    });
+  };
+  onFrame.restore = records => {
+    if (!Array.isArray(records) || records.length > 64) throw Error('Invalid saved TCP connections');
+    connections.clear();
+    const now = frozenAt ?? Date.now();
+    for (const record of records) {
+      const { key, age, secure: state, inflight, ...fields } = record;
+      const secure = state ? createSecureSession() : null;
+      if (state) secure.restore(state);
+      connections.set(key, { ...structuredClone(fields), lastSeen: now - age, secure,
+        inflight: inflight ? { ...structuredClone(inflight), sentAt: now - inflight.age } : null });
+    }
+    if (connections.size && !retransmitTimer) retransmitTimer = setInterval(tick, 250);
+  };
   return onFrame;
 }

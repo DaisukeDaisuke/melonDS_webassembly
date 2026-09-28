@@ -20,11 +20,9 @@ class MelonAudio extends AudioWorkletProcessor {
   if(!this.started&&this.write-this.read>=4096)this.started=true;
   const base=48000/sampleRate;
   const queued=this.write-this.read;
-  // Follow the measured producer clock smoothly. A core running at 57 FPS
-  // cannot feed a fixed 59.8-FPS consumer; resetting every ~3s only hides that
-  // mismatch. Keep latency bounded without inserting periodic silence.
-  const desired=Math.max(0.80,Math.min(1.08,1+(queued-4096)/32000));
-  this.speed+=(desired-this.speed)*0.005;
+  // Delivery jitter changes the queued amount, not the sound's pitch.
+  // Keep the hardware sample clock fixed even when rendering is overloaded.
+  this.speed=1;
   for(let n=0;n<l.length;n++){
    if(this.started&&this.read+1<this.write){
     const at=Math.floor(this.read),f=this.read-at,p=at&32767,q=(at+1)&32767;

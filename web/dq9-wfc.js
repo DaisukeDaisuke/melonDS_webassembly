@@ -48,6 +48,7 @@ export function createDq9WfcHandler({ dlc = {}, getFile } = {}) {
     return bytes.length <= maxSize ? bytes : 'oversize';
   }
   return Object.freeze({
+    snapshot: () => structuredClone(Object.fromEntries(games)),
     setDlc(game, files) {
       if (!validGame(game) || !files || typeof files !== 'object') throw new TypeError('Invalid game or DLC files');
       games.set(game.toUpperCase(), { ...files });

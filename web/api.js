@@ -11,7 +11,7 @@ const METHODS = Object.freeze({
   createInstance: 'global', listInstances: 'global', loadRomMany: 'global',
   destroyInstance: 'instance', status: 'instance', pause: 'instance', resume: 'instance',
   reset: 'instance', step: 'instance', stepOver: 'instance', smartStep: 'instance', runUntil: 'instance',
-  loadRom: 'instance', loadState: 'instance', saveState: 'instance',
+  loadRom: 'instance', loadSystemFile: 'instance', loadState: 'instance', saveState: 'instance',
   exportState: 'instance', importSave: 'instance', exportSave: 'instance',
   saveStateToBrowser: 'instance', loadStateFromBrowser: 'instance',
   saveSaveToBrowser: 'instance', loadSaveFromBrowser: 'instance', listBrowserStates: 'instance',

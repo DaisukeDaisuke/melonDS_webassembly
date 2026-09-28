@@ -1,4 +1,6 @@
 import { createApi, MAX_INSTANCES } from './api.js';
+import { systemFiles, systemKind } from './system-files.js';
+import { createWorkspaceService } from './workspace-service.js';
 import { createWasmBackend } from './backend.js';
 import { createScriptBackend } from './script-service.js';
 import { loadLayout, saveLayout, makeTile, TILE_TYPES, LABELS } from './layout.js';
@@ -26,6 +28,22 @@ globalThis.melondsVirtualNetwork = createVirtualNetwork(api, { onEvent: event =>
   for (const tile of workspace.querySelectorAll('[data-type="wifi-log"]')) tile.querySelector('.tile-body').dispatchEvent(new Event('packet'));
 } });
 globalThis.melondsFiles = globalThis.melondsVirtualNetwork.files;
+globalThis.melondsWorkspace = createWorkspaceService({ api, backend, network: globalThis.melondsVirtualNetwork,
+  readUI: () => ({ layout: structuredClone(layout), names: [...state.names], logs: structuredClone(state.logs),
+    selectedInstance: $('#rom-instance').value, audio: audio.stats().instances.map(record => record.instanceId) }),
+  async restoreUI(saved, scripts) {
+    Object.assign(layout, saved.layout);
+    state.names = new Map(saved.names); state.logs = saved.logs;
+    for (const script of scripts) {
+      if (!layout.tiles.some(tile => tile.type === 'persistent-scripts' && tile.instanceId === script.instanceId && tile.settings.code === script.code)) {
+        layout.tiles.push(makeTile('persistent-scripts', { instanceId: script.instanceId, settings: { code: script.code, name: script.name } }));
+      }
+    }
+    renderLayout(); save(); $('#rom-instance').value = saved.selectedInstance;
+    for (const instanceId of saved.audio || []) if (state.instances.includes(instanceId) && !audio.has(instanceId)) await audio.toggle(instanceId);
+    if (scripts.some(script => script.running)) $('#notice').textContent = 'スクリプトのソースを復元しました。Workerは停止状態です。';
+  }
+});
 
 function errorMessage(error) {
   $('#notice').textContent = error?.message || String(error);
@@ -114,7 +132,8 @@ function refreshSummary() {
 }
 function addTile(type, x, y) {
   const top = Math.max(1, ...layout.tiles.map(t => t.z || 1)) + 1;
-  const tile = makeTile(type, { x: Math.max(0, x), y: Math.max(0, y), z: top, instanceId: Number($('#rom-instance').value) || 0 });
+  const unusedScreen = Array.from({ length: MAX_INSTANCES }, (_, id) => id).find(id => !layout.tiles.some(tile => tile.type === 'screen' && tile.instanceId === id));
+  const tile = makeTile(type, { x: Math.max(0, x), y: Math.max(0, y), z: top, instanceId: type === 'screen' && unusedScreen !== undefined ? unusedScreen : Number($('#rom-instance').value) || 0 });
   layout.tiles.push(tile); save(); renderTile(tile); refreshSummary(); updateScreenTargets(); updateAudioTargets();
 }
 function renderLog(body, tile) {
@@ -124,6 +143,8 @@ function renderLog(body, tile) {
   filter.prepend(showAll); controls.append(filter);
   const pause = el('input'); pause.type = 'checkbox'; pause.checked = !!tile.settings.paused;
   const pauseLabel = el('label', '', ' 表示を停止'); pauseLabel.prepend(pause); controls.append(pauseLabel);
+  const decodedOnly = el('input'); decodedOnly.type = 'checkbox'; decodedOnly.checked = !!tile.settings.decodedOnly;
+  if (tile.type === 'wifi-log') { const label = el('label', '', ' 復号・再構成済み'); label.prepend(decodedOnly); controls.append(label); }
   controls.append(button('消去', () => { state.logs[tile.type] = []; update(); }));
   if (tile.type === 'wifi-log') {
     controls.append(button('DQ9 WFC 接続', async () => {
@@ -138,26 +159,30 @@ function renderLog(body, tile) {
   head.append(header); table.append(head); const tbody = el('tbody'); table.append(tbody); body.append(table);
   const empty = el('p', 'muted', '受信データはまだありません。'); body.append(empty);
   const detail = el('pre', 'network-detail'); detail.hidden = true; body.append(detail);
+  let selectedPacket = null;
   function update() {
     if (tile.settings.paused) return;
     tbody.replaceChildren();
-    const entries = state.logs[tile.type].filter(packet => tile.settings.all ||
-      packet.instanceId === tile.instanceId || packet.destination === tile.instanceId).slice(-100);
+    const entries = state.logs[tile.type].filter(packet => (!tile.settings.decodedOnly || packet.logical) &&
+      (tile.settings.all || packet.instanceId === tile.instanceId || packet.destination === tile.instanceId)).slice(-100);
     empty.hidden = !!entries.length;
     for (const packet of entries) {
       const tr = el('tr');
       const sender = tile.type === 'wifi-log' && packet.direction === 'RX' ? 'NET' : packet.senderId ?? packet.instanceId;
       const receiver = tile.type === 'wifi-log' ? (packet.direction === 'RX' ? packet.instanceId : 'NET') : packet.destination ?? '*';
       const decoded = tile.type === 'wifi-log' ? (packet.decoded ||= decodePacket(packet)) : null;
-      const raw = packet.payload ? Array.from(packet.payload, n => n.toString(16).padStart(2, '0')).join(' ') : '';
+      const raw = () => packet.payload ? Array.from(packet.payload, n => n.toString(16).padStart(2, '0')).join(' ') : '';
       for (const value of [packet.timestamp, packet.direction || 'TX', decoded?.source || sender, decoded?.destination || receiver,
         decoded?.protocol || packet.packetType || 'PACKET', packet.length ?? packet.payload?.length ?? 0,
-        decoded?.summary || raw.slice(0, 192)]) tr.append(el('td', '', String(value)));
-      tr.onclick = () => { for (const selected of tbody.querySelectorAll('.selected')) selected.classList.remove('selected'); tr.classList.add('selected'); detail.hidden = false; detail.textContent = decoded?.detail || raw; };
+        decoded?.summary || Array.from(packet.payload?.slice(0, 64) || [], n => n.toString(16).padStart(2, '0')).join(' ')]) tr.append(el('td', '', String(value)));
+      tr.tabIndex = 0; tr.classList.toggle('selected', selectedPacket === packet);
+      tr.onclick = () => { selectedPacket = packet; for (const selected of tbody.querySelectorAll('.selected')) selected.classList.remove('selected'); tr.classList.add('selected'); detail.hidden = false; detail.textContent = decoded?.detail || raw(); };
+      tr.onkeydown = event => { if (event.key === 'Enter') tr.click(); };
       tbody.append(tr);
     }
   }
   showAll.onchange = () => { tile.settings.all = showAll.checked; save(); update(); };
+  decodedOnly.onchange = () => { tile.settings.decodedOnly = decodedOnly.checked; save(); update(); };
   pause.onchange = () => { tile.settings.paused = pause.checked; save(); update(); };
   body.addEventListener('target-change', update);
   let repaint = 0;
@@ -175,6 +200,71 @@ function renderBody(body, tile, tileElement) {
   if (tile.type === 'files') return renderFileExplorer(body, {
     files: globalThis.melondsFiles, tile, save, onError: errorMessage
   });
+  if (tile.type === 'system') {
+    return renderSystem();
+  }
+  if (tile.type === 'workspace') {
+    const controls = row(body), input = el('input'), status = el('div');
+    input.type = 'file'; input.accept = '.mel'; input.hidden = true; input.setAttribute('aria-label', '.mel を開く');
+    const name = textInput(controls, 'ファイル名', tile.settings.filename || 'workspace.mel');
+    controls.append(button('全体を保存', async () => {
+      status.textContent = '保存中…';
+      try {
+        const file = await globalThis.melondsWorkspace.export();
+        tile.settings.filename = name.value || 'workspace.mel'; save();
+        download(file, tile.settings.filename.endsWith('.mel') ? tile.settings.filename : `${tile.settings.filename}.mel`);
+        status.textContent = `${(file.size / 1048576).toFixed(1)} MiB · 保存済み`;
+      } catch (error) { status.textContent = String(error.message || error); throw error; }
+    }), button('.mel を開く', () => input.click()), input);
+    input.onchange = () => void apply(null, async () => {
+      const file = input.files?.[0]; if (!file) return;
+      status.textContent = '復元中…';
+      await globalThis.melondsWorkspace.import(file);
+      $('#notice').textContent = `${file.name} · 復元しました`;
+    }).finally(() => { input.value = ''; });
+    body.append(status); return;
+  }
+  function renderSystem() {
+    const controls = row(body), input = el('input');
+    input.type = 'file'; input.accept = '.bin,.rom'; input.multiple = true; input.hidden = true;
+    input.setAttribute('aria-label', 'BIOSとファームウェア');
+    const all = el('input'); all.type = 'checkbox';
+    const allLabel = el('label', '', ' 全インスタンス'); allLabel.prepend(all);
+    const defaults = el('input'); defaults.type = 'checkbox'; defaults.checked = true;
+    const defaultLabel = el('label', '', ' 次回も使用'); defaultLabel.prepend(defaults);
+    controls.append(button('ファイルを開く', () => input.click()), allLabel, defaultLabel, input);
+    const information = el('div', 'system-status'); body.append(information);
+    const refresh = async () => {
+      if (!state.instances.includes(tile.instanceId)) { information.textContent = 'インスタンス未作成'; return; }
+      const { system } = await api.status(args());
+      information.replaceChildren(...[['BIOS7', system.nativeBios7 ? '実機' : system.bios7 ? '読込済み' : '内蔵'],
+        ['BIOS9', system.nativeBios9 ? '実機' : system.bios9 ? '読込済み' : '内蔵'],
+        ['Firmware', system.firmware ? '読込済み' : '内蔵']].map(([name, value]) => el('p', '', `${name}: ${value}`)));
+    };
+    controls.append(button('更新', refresh));
+    input.onchange = () => {
+      const images = [...input.files];
+      void apply(null, async () => {
+        const incoming = images.map(file => ({ file, kind: systemKind(file) }));
+        await ensureInstance(tile.instanceId);
+        const ids = all.checked ? [...state.instances] : [tile.instanceId];
+        const statuses = await Promise.all(ids.map(instanceId => api.status({ instanceId })));
+        for (const status of statuses) await api.pause({ instanceId: status.instanceId });
+        try {
+          for (const { file, kind } of incoming) {
+            for (const status of statuses) await api.loadSystemFile({ instanceId: status.instanceId, kind, file });
+            if (defaults.checked) await systemFiles.put(file);
+          }
+        } finally {
+          for (const status of statuses) if (status.loaded && !status.paused) await api.resume({ instanceId: status.instanceId });
+        }
+        await refresh();
+      }).finally(() => { input.value = ''; });
+    };
+    body.addEventListener('target-change', () => void apply(null, refresh));
+    void apply(null, refresh);
+    return;
+  }
   if (tile.type === 'screen') {
     const stack = el('div', 'screens');
     stack.tabIndex = 0;
@@ -214,7 +304,13 @@ function renderBody(body, tile, tileElement) {
     });
     tileElement._syncAudio = () => { toggleAudio.textContent = audio.has(tile.instanceId) ? '音声 ON' : '音声 OFF'; toggleAudio.setAttribute('aria-pressed', String(audio.has(tile.instanceId))); };
     tileElement._syncAudio();
-    footer.append(filename, toggleAudio);
+    const linkInput = el('select'); linkInput.setAttribute('aria-label', '入力連動先');
+    linkInput.append(new Option('入力連動なし', ''));
+    for (let id = 0; id < MAX_INSTANCES; id++) linkInput.append(new Option(`#${id} と連動`, String(id)));
+    linkInput.value = Number.isInteger(tile.settings.inputLink) ? String(tile.settings.inputLink) : '';
+    linkInput.onchange = () => { release(); tile.settings.inputLink = linkInput.value === '' ? null : Number(linkInput.value); save(); };
+    const targets = () => [...new Set([tile.instanceId, tile.settings.inputLink].filter(id => Number.isInteger(id) && state.instances.includes(id)))];
+    footer.append(filename, button('キー入力', () => stack.focus({ preventScroll: true })), linkInput, toggleAudio);
     stack.append(top, bottom);
     body.append(toolbar, stack, footer);
     const fit = new ResizeObserver(() => {
@@ -223,36 +319,48 @@ function renderBody(body, tile, tileElement) {
     });
     fit.observe(body); fit.observe(toolbar); fit.observe(footer);
     tileElement._cleanup = () => fit.disconnect();
-    const held = new Set();
+    const held = new Map();
     const keymap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', KeyX: 'A', KeyZ: 'B', KeyS: 'X', KeyA: 'Y', KeyQ: 'L', KeyW: 'R', Enter: 'START', ShiftLeft: 'SELECT', ShiftRight: 'SELECT' };
     stack.addEventListener('keydown', event => {
       const key = keymap[event.code]; if (!key) return;
       event.preventDefault(); if (held.has(key)) return;
-      held.add(key); void apply(null, () => api.input(args({ key, pressed: true })));
+      const ids = targets(); held.set(key, ids);
+      for (const instanceId of ids) void apply(null, () => api.input({ instanceId, key, pressed: true }));
     });
     stack.addEventListener('keyup', event => {
       const key = keymap[event.code]; if (!key) return;
-      event.preventDefault(); held.delete(key); void apply(null, () => api.input(args({ key, pressed: false })));
+      event.preventDefault(); const ids = held.get(key) || []; held.delete(key);
+      for (const instanceId of ids) void apply(null, () => api.input({ instanceId, key, pressed: false }));
     });
-    let touchPointer = null, touchedInstance = null;
+    let touchPointer = null, touchedInstances = [], pendingTouch = null, touchFrame = 0;
+    let touchQueue = Promise.resolve();
+    const sendTouch = value => {
+      const ids = [...touchedInstances];
+      touchQueue = touchQueue.catch(() => {}).then(async () => {
+        for (const instanceId of ids) await api.touch({ instanceId, ...value });
+      }).catch(errorMessage);
+    };
     const release = () => {
-      for (const key of held) void api.input(args({ key, pressed: false })).catch(() => {});
+      for (const [key, ids] of held) for (const instanceId of ids) void api.input({ instanceId, key, pressed: false }).catch(() => {});
       held.clear();
-      if (touchedInstance !== null) void api.touch({ instanceId: touchedInstance, x: 0, y: 0, pressed: false }).catch(() => {});
-      touchPointer = null; touchedInstance = null;
+      cancelAnimationFrame(touchFrame); touchFrame = 0; pendingTouch = null;
+      if (touchedInstances.length) sendTouch({ x: 0, y: 0, pressed: false });
+      touchPointer = null; touchedInstances = [];
     };
     tileElement._releaseInput = release;
     stack.addEventListener('blur', release);
-    const touch = event => {
+    const touch = (event, immediate = false) => {
       const rect = bottom.getBoundingClientRect();
-      void apply(null, () => api.touch({ instanceId: touchedInstance,
+      pendingTouch = {
         x: Math.max(0, Math.min(255, Math.floor((event.clientX - rect.left) * 256 / rect.width))),
-        y: Math.max(0, Math.min(191, Math.floor((event.clientY - rect.top) * 192 / rect.height))), pressed: true }));
+        y: Math.max(0, Math.min(191, Math.floor((event.clientY - rect.top) * 192 / rect.height))), pressed: true };
+      const flush = () => { touchFrame = 0; if (pendingTouch) { sendTouch(pendingTouch); pendingTouch = null; } };
+      if (immediate) flush(); else if (!touchFrame) touchFrame = requestAnimationFrame(flush);
     };
     bottom.addEventListener('pointerdown', event => {
       if (event.button !== 0 || touchPointer !== null) return;
       stack.focus(); bottom.setPointerCapture(event.pointerId);
-      touchPointer = event.pointerId; touchedInstance = tile.instanceId; touch(event);
+      touchPointer = event.pointerId; touchedInstances = targets(); touch(event, true);
     });
     bottom.addEventListener('pointermove', event => { if (event.pointerId === touchPointer) touch(event); });
     bottom.addEventListener('pointerup', release); bottom.addEventListener('pointercancel', release);
@@ -433,8 +541,8 @@ function renderTile(tile) {
   node.dataset.id = tile.id; node.dataset.type = tile.type;
   node.querySelector('.tile-title').textContent = LABELS[tile.type];
   node.querySelector('.tile-id').textContent = `#${String(tile.instanceId).padStart(2, '0')}`;
-  if (tile.type === 'files') {
-    node.querySelector('.tile-id').textContent = 'DLC';
+  if (tile.type === 'files' || tile.type === 'workspace') {
+    node.querySelector('.tile-id').textContent = tile.type === 'files' ? 'DLC' : '.mel';
     node.querySelector('.tile-target').hidden = true;
   }
   const select = node.querySelector('.instance-select'); populateInstances(select, tile.instanceId);
@@ -445,7 +553,7 @@ function renderTile(tile) {
   };
   const cpu = node.querySelector('.cpu-select'); cpu.value = tile.cpu;
   cpu.onchange = () => { tile.cpu = cpu.value; save(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change')); };
-  if (['screen', 'local-log', 'wifi-log', 'input', 'state', 'save', 'script', 'persistent-scripts'].includes(tile.type)) node.querySelector('.cpu-label').hidden = true;
+  if (['screen', 'local-log', 'wifi-log', 'input', 'state', 'save', 'script', 'persistent-scripts', 'system', 'workspace', 'files'].includes(tile.type)) node.querySelector('.cpu-label').hidden = true;
   const min = node.querySelector('.tile-minimize');
   min.onclick = () => { tile.minimized = !tile.minimized; node.classList.toggle('minimized', tile.minimized); min.setAttribute('aria-label', tile.minimized ? '展開' : '最小化'); save(); updateScreenTargets(); };
   node.classList.toggle('minimized', tile.minimized);
@@ -525,6 +633,7 @@ $('#create-instance').onclick = event => apply(event.currentTarget, async () => 
   if (!layout.tiles.some(tile => tile.type === 'screen' && tile.instanceId === id)) addTile('screen', 16 + id * 24, 16 + id * 24);
 });
 $('#open-rom').onclick = () => $('#rom-file').click();
+
 $('#rom-target').onchange = () => { $('#instance-count-label').hidden = $('#rom-target').value !== 'all'; };
 $('#rom-target').onchange();
 $('#rom-file').onchange = event => {

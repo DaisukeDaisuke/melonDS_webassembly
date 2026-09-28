@@ -46,6 +46,19 @@ async function transact(mode, use) {
 }
 export function createFileStore() {
   return Object.freeze({
+    snapshot: () => transact('readonly', store => store.getAll()),
+    async restore(records) {
+      if (!Array.isArray(records) || records.length > 10000) throw Error('Invalid DLC workspace');
+      for (const record of records) {
+        checkedPath(record.path);
+        if (!(record.blob instanceof Blob) || record.blob.size > 16 * 1024 * 1024) throw Error('Invalid DLC file');
+      }
+      await transact('readwrite', store => {
+        let request = store.clear();
+        for (const record of records) request = store.put(record);
+        return request;
+      });
+    },
     async put({ path, data }) {
       checkedPath(path);
       const blob = data instanceof Blob ? data : new Blob([data], {

@@ -5,6 +5,7 @@ const uint = { type: 'integer', minimum: 0, maximum: 4294967295 };
 const bytes = { type: 'array', items: { type: 'integer', minimum: 0, maximum: 255 } };
 const cpu = { type: 'string', enum: ['ARM9', 'ARM7'] };
 const toolInputs = {
+  loadSystemFile: [{ kind: { type: 'string', enum: ['bios7', 'bios9', 'firmware'] } }, ['kind', 'fileBase64']],
   status: [{}, []], pause: [{}, []], resume: [{}, []], reset: [{}, []],
   step: [{ cpu }, []], stepOver: [{ cpu }, []], smartStep: [{ cpu }, []],
   runUntil: [{ cpu, address: uint, timeoutMs: { type: 'integer', minimum: 1 } }, ['address']],
@@ -60,7 +61,7 @@ export async function registerWebMcp(api, modelContext = document.modelContext |
   let count = 0;
   for (const name of api.toolNames()) {
     const globalTool = ['listInstances', 'createInstance', 'loadRomMany', 'operationStatus', 'cancelOperation'].includes(name);
-    const binaryTool = ['loadRom', 'loadRomMany', 'loadState', 'importSave'].includes(name);
+    const binaryTool = ['loadRom', 'loadRomMany', 'loadState', 'importSave', 'loadSystemFile'].includes(name);
     const [operationProperties, operationRequired] = toolInputs[name] || [{}, []];
     const schema = {
       type: 'object', properties: {

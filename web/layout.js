@@ -1,13 +1,13 @@
 export const TILE_TYPES = Object.freeze([
   'screen', 'debugger', 'memory', 'disassembly', 'registers', 'breakpoints', 'callstack', 'save',
-  'local-log', 'wifi-log', 'script', 'persistent-scripts', 'input', 'state', 'files'
+  'local-log', 'wifi-log', 'script', 'persistent-scripts', 'input', 'state', 'files', 'system', 'workspace'
 ]);
 export const LABELS = Object.freeze({
   screen: 'エミュレータ', debugger: 'デバッガ', memory: 'メモリ',
   disassembly: '逆アセンブル', registers: 'レジスタ', breakpoints: 'ブレークポイント',
   'local-log': 'ローカル通信', 'wifi-log': 'Wi-Fi', script: 'スクリプト',
   'persistent-scripts': '常駐スクリプト', input: '入力', state: 'ステート', save: 'セーブデータ', callstack: 'コールスタック',
-  files: 'DLCファイル'
+  files: 'DLCファイル', system: 'BIOS / FW', workspace: '全体保存 .mel'
 });
 const KEY = 'melonds.workspace.v1';
 const defaultTiles = [

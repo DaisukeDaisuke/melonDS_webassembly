@@ -12,9 +12,15 @@ await esbuild.build({
   bundle: true, minify: true, format: 'esm', platform: 'browser', target: ['chrome120'],
   legalComments: 'external', logLevel: 'info',
   plugins: [{ name: 'pthread-source', setup(build) {
-    build.onLoad({ filter: /[\\/]dist[\\/]melonds\.worker\.js$/ }, async ({ path }) => ({
-      contents: await readFile(path, 'utf8'), loader: 'text'
-    }));
+    build.onResolve({ filter: /melonds\.worker\.js$/ }, () => ({ path: 'pthread-bootstrap', namespace: 'pthread-source' }));
+    build.onLoad({ filter: /.*/, namespace: 'pthread-source' }, async () => {
+      // Older Emscripten emits a separate worker. Newer versions embed the
+      // pthread bootstrap in melonds.js and do not emit this file at all.
+      let contents = '';
+      try { contents = await readFile(join(root, 'web/dist/melonds.worker.js'), 'utf8'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      return { contents, loader: 'text' };
+    });
   } }]
 });
 const html = await readFile(join(root, 'web/index.html'), 'utf8');

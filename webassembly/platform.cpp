@@ -1,6 +1,7 @@
 #include "Platform.h"
 #include "LocalMP.h"
 #include "virtual-net.h"
+#include "Savestate.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -66,6 +67,26 @@ struct FileHandle { FILE* stream; };
 struct Thread { std::thread worker; };
 struct Mutex { std::mutex lock; };
 struct Semaphore { std::mutex mutex; std::condition_variable signal; int count = 0; };
+void WebSemaphoreState(Savestate* state, Semaphore* semaphore) {
+    std::lock_guard<std::mutex> lock(semaphore->mutex);
+    state->VarArray(&semaphore->count, sizeof(semaphore->count));
+    if (!state->Saving) semaphore->signal.notify_all();
+}
+void WebNetDoTransportState(Savestate* state) {
+    std::lock_guard<std::mutex> lock(netLock);
+    state->VarArray(netEnabled.data(), sizeof(netEnabled));
+    auto queue = [&](std::deque<WebNetFrame>& frames, u32 maximum) {
+        u32 count = static_cast<u32>(frames.size()); state->Var32(&count);
+        if (count > maximum) { state->Error = true; return; }
+        if (!state->Saving) frames.resize(count);
+        for (auto& frame : frames) {
+            state->VarArray(&frame, sizeof(frame));
+            if (frame.instanceId < 0 || frame.instanceId >= 16 || frame.length < 14 || frame.length > 2048) state->Error = true;
+        }
+    };
+    for (auto& frames : netPending) queue(frames, 256);
+    queue(netEvents, 512); state->Var32(&netDropped);
+}
 
 void SignalStop(StopReason, void*) {}
 std::string GetLocalFilePath(const std::string& name) { return name; }

@@ -148,14 +148,16 @@ const handshake = (type, body) => concat(Uint8Array.of(type), three(body.length)
 const record = (type, data) => concat(Uint8Array.of(type, 3, 0), word(data.length), data);
 
 export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRequest, onDiagnostic = () => {} }) {
-  const certificate = pem(certificatePem), chain = chainPem ? pem(chainPem) : null;
+  const blocks = [...`${certificatePem || ''}\n${chainPem || ''}`.matchAll(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----/g)].map(match => match[0]);
+  const certificates = [...new Set(blocks.map(block => block.replace(/\s/g, '')))].map(normalized => pem(blocks.find(block => block.replace(/\s/g, '') === normalized)));
+  if (!certificates.length) throw Error('SSL certificate chain is empty');
   const key = integers(pem(privateKeyPem));
   return function createSession() {
     let input = new Uint8Array(), handshakes = new Uint8Array(), transcript = new Uint8Array();
     let randomClient, randomServer, master, readCipher, writeCipher, readMac, writeMac;
     let readSeq = 0n, writeSeq = 0n, digest = sha, secure = false, established = false;
     let http = new Uint8Array();
-    const certificateList = concat(...[certificate, chain].filter(Boolean).map(cert => concat(three(cert.length), cert)));
+    const certificateList = concat(...certificates.map(cert => concat(three(cert.length), cert)));
     const serverCert = handshake(11, concat(three(certificateList.length), certificateList));
     async function decrypt(type, data) {
       if (!readCipher) throw Error('SSL cipher not ready');
@@ -182,7 +184,7 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
         const suite = ciphers.some((_, n) => n % 2 === 0 && ciphers[n] === 0 && ciphers[n + 1] === 5) ? 5
           : ciphers.some((_, n) => n % 2 === 0 && ciphers[n] === 0 && ciphers[n + 1] === 4) ? 4 : 0;
         if (!suite) throw Error('Client lacks SSL_RSA_WITH_RC4 cipher');
-        onDiagnostic(`ClientHello → SSLv3 RSA RC4 ${suite === 5 ? 'SHA' : 'MD5'} · Certificate / ServerHelloDone`);
+        onDiagnostic(`ClientHello → SSLv3 RSA RC4 ${suite === 5 ? 'SHA' : 'MD5'} · Certificate ${certificates.length}枚 (${certificates.map(cert => cert.length).join('+')} bytes) / ServerHelloDone`);
         digest = suite === 5 ? sha : md5;
         randomServer = crypto.getRandomValues(new Uint8Array(32));
         // SSLv3 Random starts with the server's Unix time, then 28 random bytes.
@@ -192,9 +194,9 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
           Uint8Array.of(sessionId.length), sessionId, Uint8Array.of(0, suite, 0)));
         const done = handshake(14, new Uint8Array());
         transcript = concat(transcript, message, hello, serverCert, done);
-        // Send the server flight in one handshake record, as the reference
-        // OpenSSL server does. TCP may split the record independently.
-        return record(22, concat(hello, serverCert, done));
+        // Preserve handshake-message boundaries in the record layer. TCP
+        // segmentation is independent and follows the client's advertised MSS.
+        return concat(record(22, hello), record(22, serverCert), record(22, done));
       }
       if (type === 16 && randomServer && !master) {
         const encrypted = body.length > 2 && read16(body, 0) === body.length - 2 ? body.subarray(2) : body;
@@ -225,6 +227,31 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
     }
     return {
       async receive(chunk) {
+        return receiveChunk(chunk);
+      },
+      snapshot() {
+        const cipher = value => value ? { s: value.s.slice(), i: value.i, j: value.j } : null;
+        return structuredClone({ input, handshakes, transcript, randomClient, randomServer, master,
+          readCipher: cipher(readCipher), writeCipher: cipher(writeCipher), readMac, writeMac,
+          readSeq: String(readSeq), writeSeq: String(writeSeq), sha: digest === sha, secure, established, http });
+      },
+      restore(saved) {
+        const cipher = value => {
+          if (!value) return undefined;
+          if (value.s?.length !== 256) throw Error('Invalid saved RC4 state');
+          const result = Object.create(Rc4.prototype);
+          result.s = new Uint8Array(value.s); result.i = value.i; result.j = value.j; return result;
+        };
+        const bytes = value => value == null ? undefined : new Uint8Array(value);
+        input = bytes(saved.input); handshakes = bytes(saved.handshakes); transcript = bytes(saved.transcript);
+        randomClient = bytes(saved.randomClient); randomServer = bytes(saved.randomServer); master = bytes(saved.master);
+        readMac = bytes(saved.readMac); writeMac = bytes(saved.writeMac);
+        readCipher = cipher(saved.readCipher); writeCipher = cipher(saved.writeCipher);
+        readSeq = BigInt(saved.readSeq); writeSeq = BigInt(saved.writeSeq);
+        digest = saved.sha ? sha : md5; secure = !!saved.secure; established = !!saved.established; http = bytes(saved.http);
+      }
+    };
+    async function receiveChunk(chunk) {
         input = concat(input, chunk);
         if (input.length > 5 * 1024 * 1024 + 65536) throw Error('SSL input too large');
         const outgoing = [];
@@ -277,6 +304,5 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
         }
         return { bytes: concat(...outgoing), close: false };
       }
-    };
   };
 }

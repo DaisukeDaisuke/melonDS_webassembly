@@ -6,6 +6,7 @@ import { assertSafeScriptSource } from './sandbox/upstream/src/script-source-pol
 import { ResourceLimits } from './sandbox/upstream/src/resource-limits.js';
 import { normalizePersistentMcpParams } from './sandbox/upstream/src/worker-rpc-payload.js';
 import { sessionStore } from './session-store.js';
+import { systemFiles } from './system-files.js';
 const persistentMethods = new Set(['startPersistentScript', 'stopPersistentScript',
   'restartPersistentScript', 'listPersistentScripts', 'callPersistentScriptMcp', 'runScript']);
 const MAX_SCRIPTS = ResourceLimits.persistentScripts;
@@ -36,6 +37,7 @@ export function createScriptBackend(native) {
   const scripts = new Map();
   const capturedFrames = new Map();
   const romHashes = new Map();
+  const romFiles = new Map();
   let workerSources;
   const subscribers = new Set();
   let eventSerial = 0;
@@ -382,6 +384,8 @@ export function createScriptBackend(native) {
   });
   return {
     async execute(name, args = {}) {
+      if (name === 'workspaceRoms') return [...romFiles].map(([instanceId, file]) => ({ instanceId, file, hash: romHashes.get(instanceId) }));
+      if (name === 'workspaceScripts') return [...scripts.values()].map(record => ({ instanceId: record.instanceId, name: record.name, code: record.code, asyncMode: record.asyncMode, running: record.running }));
       if (name === 'waitFrames') return waitFrames(args);
       if (name === 'waitMemory') return waitMemory(args);
       if (name === 'captureFrame') {
@@ -444,13 +448,14 @@ export function createScriptBackend(native) {
         }
         const hash = ['loadRom', 'loadRomMany'].includes(name) ? await romHash(args.file) : null;
         const result = await native.execute(name, args);
+        if (name === 'createInstance') await systemFiles.apply(native, result.instanceId);
         if (['createInstance', 'destroyInstance', 'loadRom', 'loadRomMany'].includes(name)) {
           const ids = name === 'loadRomMany' ? args.instanceIds : [name === 'createInstance' ? result.instanceId : args.instanceId];
           for (const instanceId of ids) for (const listener of subscribers) listener({ type: 'instance-change', action: name, instanceId, romName: args.file?.name });
         }
-        if (name === 'destroyInstance') romHashes.delete(args.instanceId);
-        if (name === 'loadRom') romHashes.set(args.instanceId, hash);
-        if (name === 'loadRomMany') for (const id of args.instanceIds) romHashes.set(id, hash);
+        if (name === 'destroyInstance') { romHashes.delete(args.instanceId); romFiles.delete(args.instanceId); }
+        if (name === 'loadRom') { romHashes.set(args.instanceId, hash); romFiles.set(args.instanceId, args.file); }
+        if (name === 'loadRomMany') for (const id of args.instanceIds) { romHashes.set(id, hash); romFiles.set(id, args.file); }
         if (name === 'destroyInstance' || name === 'loadRom' || name === 'reset') capturedFrames.delete(args.instanceId);
         if (name === 'loadRomMany') for (const id of args.instanceIds) capturedFrames.delete(id);
         if (name === 'saveState' || name === 'loadState') {
