@@ -82,6 +82,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
           if (!response.ok) throw Error(`Cannot load same-origin DQ9 certificate ${file}: ${response.status}`);
           return response.text();
         }));
+      await api.setNetworkBackend({ instanceId: options.instanceId, backend: 'virtual', configureAccessPoint: true });
       return registerDq9Wfc({ ...options, certificatePem, privateKeyPem, chainPem });
     },
     unregister({ instanceId: id }) { instanceId(id); servers.get(id)?.close?.(); servers.delete(id); },

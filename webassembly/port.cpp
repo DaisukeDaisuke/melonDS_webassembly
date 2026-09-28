@@ -17,6 +17,7 @@
 #include <vector>
 #include <emscripten/emscripten.h>
 #include "call-stack-lens.h"
+#include "wall-clock.h"
 
 namespace {
 struct Freeze {
@@ -370,6 +371,7 @@ EMSCRIPTEN_KEEPALIVE int web_create(int id) {
     args.Firmware.GetHeader().MacAddr[5] = static_cast<melonDS::u8>(0x33 + id);
     args.Firmware.UpdateChecksums();
     instance->nds = std::make_unique<melonDS::NDS>(std::move(args), instance.get());
+    initializeWallClock(*instance->nds);
     instances[id] = std::move(instance);
     instances[id]->runner = std::thread(runFrames, instances[id].get());
     return id;
@@ -394,10 +396,7 @@ EMSCRIPTEN_KEEPALIVE int web_load_rom(int id, const melonDS::u8* data, int lengt
     if (!inst || !data || length < 0x200 || length > 512 * 1024 * 1024) return -1;
     auto cart = melonDS::NDSCart::ParseROM(data, length, inst);
     if (!cart) return -2;
-    for (const auto& other : instances) {
-        if (other && other.get() != inst && other->nds->GetNDSCart()
-            && cart->ShareROMFrom(*other->nds->GetNDSCart())) break;
-    }
+
     inst->paused = true;
     abortActiveFrame(inst);
     std::lock_guard<std::mutex> guard(inst->coreMutex);
@@ -405,6 +404,13 @@ EMSCRIPTEN_KEEPALIVE int web_load_rom(int id, const melonDS::u8* data, int lengt
     melonDS::Platform::MP_End(inst);
     melonDS::Platform::WebNetClear(id);
     inst->nds->SetNDSCart(std::move(cart));
+    // SetCart normalizes a decrypted secure area by re-encrypting it. Match
+    // only after that normalization; comparing the uploaded bytes against
+    // an already-inserted cart prevented sharing and exhausted Wasm at 16 ROMs.
+    for (const auto& other : instances) {
+        if (other && other.get() != inst && other->nds->GetNDSCart()
+            && inst->nds->GetNDSCart()->ShareROMFrom(*other->nds->GetNDSCart())) break;
+    }
     inst->save.clear();
     for (auto& state : inst->states) state.clear();
     inst->freezes.clear();
@@ -587,6 +593,16 @@ EMSCRIPTEN_KEEPALIVE int web_call_stack_snapshot(int id, int cpu, unsigned* out,
         }
     }
     return cursor;
+}
+EMSCRIPTEN_KEEPALIVE int web_rom_info(int id, int field) {
+    auto* inst = get(id); if (!inst || !inst->nds->GetNDSCart()) return 0;
+    const auto* cart = inst->nds->GetNDSCart();
+    if (field == 0) return cart->GetROMLength();
+    int count = 0;
+    for (const auto& other : instances) {
+        if (other && other->nds->GetNDSCart() && other->nds->GetNDSCart()->GetROM() == cart->GetROM()) ++count;
+    }
+    return count;
 }
 EMSCRIPTEN_KEEPALIVE double web_cpu_info(int id, int cpu, int field) {
     auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9)) return -1;
@@ -844,6 +860,23 @@ EMSCRIPTEN_KEEPALIVE int web_save_import(int id, const melonDS::u8* data, int le
     if (!inst->nds->CartInserted()) return -1;
     inst->nds->SetNDSSave(data, length);
     inst->save.assign(data, data + length);
+    return 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_prepare_virtual_ap(int id) {
+    auto* inst = get(id); if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    auto& firmware = inst->nds->SPI.GetFirmware();
+    auto& points = firmware.GetAccessPoints();
+    melonDS::Firmware::WifiAccessPoint* selected = nullptr;
+    for (auto& point : points) {
+        if (point.Status == melonDS::Firmware::AccessPointStatus::Normal && point.SSID[0]) { selected = &point; break; }
+    }
+    if (!selected) {
+        points[0] = melonDS::Firmware::WifiAccessPoint(inst->nds->ConsoleType);
+        points[0].UpdateChecksum();
+        selected = &points[0];
+    }
+    inst->nds->Wifi.SetAccessPointSSID(selected->SSID, strnlen(selected->SSID, sizeof(selected->SSID)));
     return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_copy_frame(int id, melonDS::u8* destination, int capacity) {

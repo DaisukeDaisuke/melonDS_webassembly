@@ -55,7 +55,8 @@ export function createDq9WfcHandler({ dlc = {}, getFile } = {}) {
     async handle({ port, host = '', method = 'GET', path = '/', body = new Uint8Array() }) {
       if (port === 80) return { raw: connectionTest };
       if (port !== 443) return response(404, 'err');
-      const domain = host.toLowerCase().split(':')[0];
+      // Retail and test endpoints implement the same NAS/DLS wire protocol.
+      const domain = host.toLowerCase().split(':')[0].replace(/^(nas|dls1)\.test\.nintendowifi\.net$/, '$1.nintendowifi.net');
       if (domain === 'nas.nintendowifi.net') {
         if (path === '/ac') {
           const action = param(body, 'action');

@@ -41,7 +41,7 @@ const toolInputs = {
   wifiLog: [{ limit: { type: 'integer', minimum: 1, maximum: 500 } }, []],
   operationStatus: [{ instanceId: { type: 'integer', minimum: 0, maximum: 15 } }, []],
   cancelOperation: [{ instanceId: { type: 'integer', minimum: 0, maximum: 15 } }, []],
-  setNetworkBackend: [{ backend: { type: 'string', enum: ['virtual', 'disabled'] } }, ['backend']]
+  setNetworkBackend: [{ backend: { type: 'string', enum: ['virtual', 'disabled'] }, configureAccessPoint: { type: 'boolean' } }, ['backend']]
 };
 
 function compactResult(value, name) {

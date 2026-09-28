@@ -185,11 +185,16 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
         onDiagnostic(`ClientHello → SSLv3 RSA RC4 ${suite === 5 ? 'SHA' : 'MD5'} · Certificate / ServerHelloDone`);
         digest = suite === 5 ? sha : md5;
         randomServer = crypto.getRandomValues(new Uint8Array(32));
+        // SSLv3 Random starts with the server's Unix time, then 28 random bytes.
+        new DataView(randomServer.buffer).setUint32(0, Math.floor(Date.now() / 1000), false);
+        const sessionId = crypto.getRandomValues(new Uint8Array(32));
         const hello = handshake(2, concat(Uint8Array.of(3, 0), randomServer,
-          Uint8Array.of(0, 0, suite, 0)));
+          Uint8Array.of(sessionId.length), sessionId, Uint8Array.of(0, suite, 0)));
         const done = handshake(14, new Uint8Array());
         transcript = concat(transcript, message, hello, serverCert, done);
-        return concat(record(22, hello), record(22, serverCert), record(22, done));
+        // Send the server flight in one handshake record, as the reference
+        // OpenSSL server does. TCP may split the record independently.
+        return record(22, concat(hello, serverCert, done));
       }
       if (type === 16 && randomServer && !master) {
         const encrypted = body.length > 2 && read16(body, 0) === body.length - 2 ? body.subarray(2) : body;

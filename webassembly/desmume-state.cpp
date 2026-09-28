@@ -1,6 +1,7 @@
 // DeSmuME v12 frame-boundary state import. The two cores' internal caches are
 // rebuilt from hardware state; no game addresses or game-specific patches are used.
 #include "desmume-state.h"
+#include "wall-clock.h"
 #include "NDS.h"
 #include "ARM.h"
 #include "GPU.h"
@@ -187,6 +188,7 @@ int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
     // Native scheduled callbacks/renderer objects are retained, not foreign pointers.
     n.Stop(); n.SetFirmware(Firmware(firmware.p, firmware.n));
     n.Reset(); n.SetupDirectBoot("web.nds");
+    initializeWallClock(n);
     memory.get("WRAM").copy(n.MainRAM, 0x400000);
     memory.get("ITCM").copy(n.ARM9->ITCM, 0x8000);
     memory.get("DTCM").copy(n.ARM9->DTCM, 0x4000);

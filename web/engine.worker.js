@@ -97,6 +97,7 @@ function execute(name, args) {
   if (name === 'setNetworkBackend') {
     if (!['virtual', 'disabled'].includes(args.backend)) throw Error('backend must be virtual or disabled');
     success(call('web_net_backend', id, args.backend === 'virtual' ? 1 : 0), name);
+    if (args.backend === 'virtual' && args.configureAccessPoint) success(call('web_prepare_virtual_ap', id), name);
     return { instanceId: id, backend: args.backend };
   }
   if (name === 'destroyInstance') {
@@ -127,7 +128,8 @@ function execute(name, args) {
     const isPaused = success(call('web_is_paused', id), name) !== 0;
     if (isPaused) paused.add(id); else paused.delete(id);
     return { instanceId: id, loaded: romLoaded.has(id), paused: isPaused, frames: call('web_frame_number', id),
-      networkBackend: call('web_net_backend_status', id) ? 'virtual' : 'disabled' };
+      networkBackend: call('web_net_backend_status', id) ? 'virtual' : 'disabled',
+      romBytes: call('web_rom_info', id, 0), sharedRomInstances: call('web_rom_info', id, 1) };
   }
   if (['saveState', 'loadState', 'exportState'].includes(name)) {
     if (!romLoaded.has(id)) throw Error('Load a ROM first');
@@ -582,7 +584,7 @@ onmessage = ({ data }) => {
     const result = execute(data.name, args);
     void Promise.resolve(result).then(value => postMessage({ id: data.id, result: value }),
       error => postMessage({ id: data.id, error: String(error?.message || error) }));
-    } catch (error) { postMessage({ id: data.id, error: String(error?.message || error) }); }
+    } catch (error) { if (!/^Instance \d+ does not exist$/.test(error?.message || '')) console.error(`melonDS ${data.name}`, error?.stack || error); postMessage({ id: data.id, error: String(error?.message || error) }); }
   });
 };
 
