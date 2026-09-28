@@ -29,6 +29,7 @@ globalThis.melondsVirtualNetwork = createVirtualNetwork(api, { onEvent: event =>
 } });
 globalThis.melondsFiles = globalThis.melondsVirtualNetwork.files;
 globalThis.melondsWorkspace = createWorkspaceService({ api, backend, network: globalThis.melondsVirtualNetwork,
+  beforeRestore: () => Promise.all([...document.querySelectorAll('.tile')].map(node => node._releaseInput?.())),
   readUI: () => ({ layout: structuredClone(layout), names: [...state.names], logs: structuredClone(state.logs),
     selectedInstance: $('#rom-instance').value, audio: audio.stats().instances.map(record => record.instanceId) }),
   async restoreUI(saved, scripts) {
@@ -242,6 +243,9 @@ function renderBody(body, tile, tileElement) {
         ['Firmware', system.firmware ? '読込済み' : '内蔵']].map(([name, value]) => el('p', '', `${name}: ${value}`)));
     };
     controls.append(button('更新', refresh));
+    tileElement._systemListener = event => {
+      if (event.instanceId === tile.instanceId) void apply(null, refresh);
+    };
     input.onchange = () => {
       const images = [...input.files];
       void apply(null, async () => {
@@ -329,23 +333,34 @@ function renderBody(body, tile, tileElement) {
     });
     stack.addEventListener('keyup', event => {
       const key = keymap[event.code]; if (!key) return;
-      event.preventDefault(); const ids = held.get(key) || []; held.delete(key);
+      event.preventDefault(); const ids = held.get(key) || targets(); held.delete(key);
       for (const instanceId of ids) void apply(null, () => api.input({ instanceId, key, pressed: false }));
     });
     let touchPointer = null, touchedInstances = [], pendingTouch = null, touchFrame = 0;
-    let touchQueue = Promise.resolve();
-    const sendTouch = value => {
-      const ids = [...touchedInstances];
-      touchQueue = touchQueue.catch(() => {}).then(async () => {
-        for (const instanceId of ids) await api.touch({ instanceId, ...value });
-      }).catch(errorMessage);
+    const touchQueue = [];
+    let touchDrain = null;
+    const sendTouch = (value, coalesce = false) => {
+      const packet = { ids: [...touchedInstances], value, coalesce }, tail = touchQueue.at(-1);
+      if (coalesce && tail?.coalesce && String(tail.ids) === String(packet.ids)) touchQueue[touchQueue.length - 1] = packet;
+      else touchQueue.push(packet);
+      if (!touchDrain) touchDrain = (async () => {
+        try {
+          while (touchQueue.length) {
+            const current = touchQueue.shift();
+            await Promise.all(current.ids.map(instanceId => api.touch({ instanceId, ...current.value }).catch(errorMessage)));
+          }
+        } finally { touchDrain = null; }
+      })();
+      return touchDrain;
     };
     const release = () => {
-      for (const [key, ids] of held) for (const instanceId of ids) void api.input({ instanceId, key, pressed: false }).catch(() => {});
+      const releases = [];
+      for (const [key, ids] of held) for (const instanceId of ids) releases.push(api.input({ instanceId, key, pressed: false }).catch(() => {}));
       held.clear();
       cancelAnimationFrame(touchFrame); touchFrame = 0; pendingTouch = null;
       if (touchedInstances.length) sendTouch({ x: 0, y: 0, pressed: false });
       touchPointer = null; touchedInstances = [];
+      return Promise.all([...releases, touchDrain]);
     };
     tileElement._releaseInput = release;
     stack.addEventListener('blur', release);
@@ -354,7 +369,7 @@ function renderBody(body, tile, tileElement) {
       pendingTouch = {
         x: Math.max(0, Math.min(255, Math.floor((event.clientX - rect.left) * 256 / rect.width))),
         y: Math.max(0, Math.min(191, Math.floor((event.clientY - rect.top) * 192 / rect.height))), pressed: true };
-      const flush = () => { touchFrame = 0; if (pendingTouch) { sendTouch(pendingTouch); pendingTouch = null; } };
+      const flush = () => { touchFrame = 0; if (pendingTouch) { sendTouch(pendingTouch, !immediate); pendingTouch = null; } };
       if (immediate) flush(); else if (!touchFrame) touchFrame = requestAnimationFrame(flush);
     };
     bottom.addEventListener('pointerdown', event => {
@@ -672,7 +687,10 @@ api.subscribe(event => {
     } else if (event.action === 'createInstance' && !state.instances.includes(event.instanceId)) state.instances.push(event.instanceId);
     if (event.romName) state.names.set(event.instanceId, event.romName);
     if (event.action === 'loadRom' || event.action === 'loadRomMany') audio.flush(event.instanceId);
-    for (const node of workspace.querySelectorAll('.tile')) node._debugListener?.({ type: 'debug-stop', instanceId: event.instanceId });
+    for (const node of workspace.querySelectorAll('.tile')) {
+      node._debugListener?.({ type: 'debug-stop', instanceId: event.instanceId });
+      node._systemListener?.(event);
+    }
     refreshSummary();
     return;
   }

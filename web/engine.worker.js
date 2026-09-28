@@ -70,7 +70,7 @@ function execute(name, args) {
   if (name === 'workspaceTransport') {
     if (args.data) {
       const result = withBytes(new Uint8Array(args.data), pointer => success(call('web_transport_import', pointer, args.data.length), name));
-      for (const id of instances) lastFrames.set(id, -1);
+      for (const id of ids) lastFrames.set(id, -1);
       return result;
     }
     const length = success(call('web_transport_capture'), name), pointer = call('web_transport_pointer');
@@ -293,13 +293,14 @@ function execute(name, args) {
   }
   if (name === 'addBreakpoint') {
     const selectedCpu = cpu(args.cpu || 'ARM9');
-    const kind = ({ execute: 1, read: 2, write: 3 })[args.type || 'execute'];
-    if (!kind || !Number.isInteger(args.address) || args.address < 0 || args.address > 0xffffffff) {
-      throw Error('Breakpoint requires execute/read/write and a uint32 address');
+    const kind = ({ execute: 1, read: 2, write: 3, dataAbort: 7, prefetchAbort: 8, undefinedInstruction: 9, access: 10 })[args.type || 'execute'];
+    const address = kind >= 7 && kind <= 9 ? 0 : args.address;
+    if (!kind || !Number.isInteger(address) || address < 0 || address > 0xffffffff) {
+      throw Error('Breakpoint type or uint32 address is invalid');
     }
     const length = args.length ?? 1;
-    return { instanceId: id, id: success(call('web_breakpoint_add', id, selectedCpu, kind, args.address, length), name),
-      cpu: args.cpu || 'ARM9', type: args.type || 'execute', address: args.address, length };
+    return { instanceId: id, id: success(call('web_breakpoint_add', id, selectedCpu, kind, address, length), name),
+      cpu: args.cpu || 'ARM9', type: args.type || 'execute', address, length };
   }
   if (name === 'listBreakpoints' || name === 'removeBreakpoint') {
     const count = success(call('web_breakpoint_count', id), name);
@@ -307,7 +308,7 @@ function execute(name, args) {
       success(call('web_breakpoint_entry', id, index, pointer), name);
       const view = new DataView(wasm.HEAPU8.buffer, pointer, 20);
       return { instanceId: id, id: view.getUint32(0, true), cpu: view.getUint32(4, true) === 9 ? 'ARM9' : 'ARM7',
-        type: ['none', 'execute', 'read', 'write'][view.getUint32(8, true)],
+        type: ({1:'execute',2:'read',3:'write',7:'dataAbort',8:'prefetchAbort',9:'undefinedInstruction',10:'access'})[view.getUint32(8, true)],
         address: view.getUint32(12, true), length: view.getUint32(16, true) };
     }));
     if (name === 'listBreakpoints') return list;

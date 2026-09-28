@@ -312,12 +312,22 @@ bool BeforeInstruction(ARM* cpu, u32 address) {
     inst->beforeThumb[cpu->Num] = !!(cpu->CPSR & 0x20);
     return true;
 }
+bool Exception(ARM* cpu, int kind, u32 address) {
+    auto* inst = static_cast<Instance*>(cpu->NDS.UserData);
+    if (!inst || inst->checkpointMode || !inst->frameLock
+        || std::this_thread::get_id() != inst->runner.get_id()) return true;
+    const int which = cpu->Num ? 7 : 9;
+    for (const auto& bp : inst->breakpoints) {
+        if (bp.cpu == which && bp.kind == kind) return park(inst, cpu, kind, bp.id, address, address);
+    }
+    return true;
+}
 void MemoryAccess(ARM* cpu, u32 address, u32 size, bool write) {
     auto* inst = static_cast<Instance*>(cpu->NDS.UserData);
     if (!inst || inst->watchKind) return;
     const int which = cpu->Num ? 7 : 9;
     for (const auto& bp : inst->breakpoints) {
-        if (bp.cpu != which || bp.kind != (write ? 3 : 2)) continue;
+        if (bp.cpu != which || (bp.kind != 10 && bp.kind != (write ? 3 : 2))) continue;
         if (static_cast<uint64_t>(address) < static_cast<uint64_t>(bp.address) + bp.length
             && static_cast<uint64_t>(bp.address) < static_cast<uint64_t>(address) + size) {
             inst->watchKind = bp.kind; inst->watchId = bp.id; inst->watchAddress = address;
@@ -520,7 +530,7 @@ EMSCRIPTEN_KEEPALIVE int web_peek_frame_number(int id) {
 }
 EMSCRIPTEN_KEEPALIVE int web_breakpoint_add(int id, int cpu, int kind, unsigned address, unsigned length) {
     auto* inst = get(id);
-    if (!inst || (cpu != 7 && cpu != 9) || kind < 1 || kind > 3 || length < 1 || length > 4096
+    if (!inst || (cpu != 7 && cpu != 9) || (kind != 1 && kind != 2 && kind != 3 && kind != 7 && kind != 8 && kind != 9 && kind != 10) || length < 1 || length > 4096
         || static_cast<uint64_t>(address) + length > 0x100000000ull) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     if (inst->breakpoints.size() >= 256) return -2;
@@ -604,14 +614,15 @@ EMSCRIPTEN_KEEPALIVE int web_call_stack_snapshot(int id, int cpu, unsigned* out,
     auto* inst = get(id);
     if (!inst || !out || (cpu != 7 && cpu != 9) || limit < 1 || limit > 128) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
-    const auto& lens = inst->callTrace[cpu == 9 ? 0 : 1];
+    auto& lens = inst->callTrace[cpu == 9 ? 0 : 1];
+    lens.pruneEmpty();
     size_t required = 3;
     for (const auto& lane : lens.lanes) required += 5 + std::min(lane.frames.size(), static_cast<size_t>(limit)) * 5;
     if (capacity < 0 || required > static_cast<size_t>(capacity)) return -2;
     unsigned cursor = 0, total = 0;
     for (const auto& lane : lens.lanes) total += lane.frames.size();
     out[cursor++] = lens.lanes.size();
-    out[cursor++] = lens.lanes.empty() ? 0 : lens.lanes[lens.active].id;
+    out[cursor++] = lens.active >= lens.lanes.size() ? 0 : lens.lanes[lens.active].id;
     out[cursor++] = total;
     for (const auto& lane : lens.lanes) {
         const auto count = std::min(lane.frames.size(), static_cast<size_t>(limit));

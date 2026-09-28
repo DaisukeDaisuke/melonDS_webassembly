@@ -1,5 +1,5 @@
 import { encodeWorkspace, decodeWorkspace } from './workspace-file.js';
-export function createWorkspaceService({ api, backend, network, readUI, restoreUI }) {
+export function createWorkspaceService({ api, backend, network, readUI, restoreUI, beforeRestore }) {
   let busy = false;
   async function exclusive(action) {
     if (busy) throw Error('.mel の保存または復元を実行中です');
@@ -52,6 +52,7 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
         if (record.loaded && !(saved.roms[record.rom] instanceof Blob)) throw Error('Missing .mel ROM');
         if (record.data?.slots?.length !== 10 || !record.data.system) throw Error('Missing .mel state');
       }
+      await beforeRestore?.();
       await pauseAll();
       try {
         network.restore([]);

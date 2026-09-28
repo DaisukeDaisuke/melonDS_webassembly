@@ -23,6 +23,9 @@ if (typeof window === 'undefined') {
   }
   self.addEventListener('install', () => self.skipWaiting());
   self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+  self.addEventListener('message', event => {
+    if (event.data === 'melonds-claim') event.waitUntil(self.clients.claim());
+  });
   self.addEventListener('fetch', event => {
     if (event.request.cache === 'only-if-cached' && event.request.mode !== 'same-origin') return;
     event.respondWith(request(event.request).then(response => {
@@ -40,8 +43,20 @@ if (typeof window === 'undefined') {
   (async () => {
     if (isSecureContext && 'serviceWorker' in navigator) {
       await navigator.serviceWorker.register(worker, { updateViaCache: 'none' });
-      await navigator.serviceWorker.ready;
-      if (!navigator.serviceWorker.controller) await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
+      const registration = await navigator.serviceWorker.ready;
+      // A hard reload may deliberately bypass an already active worker.
+      // Header-isolated pages can boot immediately instead of waiting forever.
+      if (!navigator.serviceWorker.controller) {
+        registration.active?.postMessage('melonds-claim');
+        if (!crossOriginIsolated) await new Promise((resolve, reject) => {
+          const changed = () => { clearTimeout(timer); resolve(); };
+          const timer = setTimeout(() => {
+            navigator.serviceWorker.removeEventListener('controllerchange', changed);
+            reject(Error('Service Workerを有効にできません。通常の再読み込みで開き直してください。'));
+          }, 5000);
+          navigator.serviceWorker.addEventListener('controllerchange', changed, { once: true });
+        });
+      }
     }
     if (!crossOriginIsolated) {
       if (!isSecureContext || !('serviceWorker' in navigator)) throw Error('HTTPSで開いてください。');

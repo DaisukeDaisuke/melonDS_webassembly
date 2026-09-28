@@ -11,7 +11,13 @@ template<class Frame> struct CallStackLens {
     unsigned nextId = 1;
     static unsigned distance(unsigned a, unsigned b) { return a > b ? a - b : b - a; }
     void clear() { lanes.clear(); active = 0; nextId = 1; }
-    size_t select(unsigned sp, unsigned pc, unsigned cpsr) {
+    void pruneEmpty() {
+        const unsigned activeId = active < lanes.size() ? lanes[active].id : 0;
+        lanes.erase(std::remove_if(lanes.begin(), lanes.end(), [](const Lane& lane) { return lane.frames.empty(); }), lanes.end());
+        active = lanes.size();
+        for (size_t n = 0; n < lanes.size(); ++n) if (lanes[n].id == activeId) { active = n; break; }
+    }
+    size_t select(unsigned sp, unsigned pc, unsigned cpsr, bool create = true) {
         size_t best = lanes.size(); unsigned delta = ~0u;
         for (size_t n = 0; n < lanes.size(); ++n) {
             auto& lane = lanes[n];
@@ -20,6 +26,7 @@ template<class Frame> struct CallStackLens {
             const unsigned diff = distance(reference, sp);
             if (diff <= 0x2000 && diff < delta) { best = n; delta = diff; }
         }
+        if (best == lanes.size() && !create) { active = best; return best; }
         if (best == lanes.size()) { lanes.push_back({nextId++, sp, pc, cpsr, {}}); best = lanes.size() - 1; }
         active = best;
         if (lanes.size() > 128) { const size_t drop = active == 0 ? 1 : 0; lanes.erase(lanes.begin() + drop); if (active > drop) --active; }
@@ -27,7 +34,9 @@ template<class Frame> struct CallStackLens {
         return active;
     }
     void tick(unsigned sp, unsigned pc, unsigned cpsr) {
-        if (lanes.empty() || active >= lanes.size() || (lanes[active].cpsr & 31) != (cpsr & 31) || distance(lanes[active].lastSp, sp) > 0x2000) select(sp, pc, cpsr);
+        if (lanes.empty()) return;
+        if (active >= lanes.size() || (lanes[active].cpsr & 31) != (cpsr & 31) || distance(lanes[active].lastSp, sp) > 0x2000) select(sp, pc, cpsr, false);
+        if (active >= lanes.size()) return;
         auto& lane = lanes[active]; lane.lastSp = sp; lane.nowPc = pc; lane.cpsr = cpsr;
     }
     void call(Frame frame) {
@@ -44,14 +53,15 @@ template<class Frame> struct CallStackLens {
     }
     void branch(unsigned target, unsigned sp, unsigned cpsr, bool canReturn) {
         tick(sp, target, cpsr);
-        auto& lane = lanes[active];
-        if (!canReturn && (lane.frames.empty() || lane.frames.back().returnAddress != (target & ~1u))) return;
+        if (lanes.empty()) return;
+        if (!canReturn && (active >= lanes.size() || lanes[active].frames.empty() || lanes[active].frames.back().returnAddress != (target & ~1u))) return;
+        const size_t start = active < lanes.size() ? active : 0;
         for (size_t attempt = 0; attempt < lanes.size(); ++attempt) {
-            const size_t n = (active + attempt) % lanes.size(); auto& candidate = lanes[n];
+            const size_t n = (start + attempt) % lanes.size(); auto& candidate = lanes[n];
             if ((candidate.cpsr & 31) != (cpsr & 31)) continue;
             for (size_t i = candidate.frames.size(); i > 0; --i) {
                 if (candidate.frames[i - 1].returnAddress != (target & ~1u)) continue;
-                candidate.frames.resize(i - 1); active = n; candidate.lastSp = sp; candidate.nowPc = target; candidate.cpsr = cpsr; return;
+                candidate.frames.resize(i - 1); active = n; candidate.lastSp = sp; candidate.nowPc = target; candidate.cpsr = cpsr; pruneEmpty(); return;
             }
         }
     }
