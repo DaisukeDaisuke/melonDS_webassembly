@@ -428,7 +428,7 @@ EMSCRIPTEN_KEEPALIVE int web_create(int id) {
     instances[id]->runner = std::thread(runFrames, instances[id].get());
     return id;
 }
-EMSCRIPTEN_KEEPALIVE int web_system_import(int id, int kind, const melonDS::u8* data, int length) {
+EMSCRIPTEN_KEEPALIVE int web_system_import(int id, int kind, const melonDS::u8* data, int length, int preserveMac) {
     auto* inst = get(id);
     if (!inst || !data) return -1;
     if ((kind == 7 && length != melonDS::ARM7BIOSSize) ||
@@ -446,7 +446,10 @@ EMSCRIPTEN_KEEPALIVE int web_system_import(int id, int kind, const melonDS::u8* 
         inst->nds->SetARM9BIOS(image); inst->systemFiles |= 2;
     } else {
         melonDS::Firmware image(data, length);
-        image.GetHeader().MacAddr[5] = static_cast<melonDS::u8>(image.GetHeader().MacAddr[5] + id);
+        // A complete workspace contains each console's already assigned MAC.
+        // Only a standalone firmware import needs the per-instance offset.
+        if (!preserveMac)
+            image.GetHeader().MacAddr[5] = static_cast<melonDS::u8>(image.GetHeader().MacAddr[5] + id);
         image.UpdateChecksums();
         inst->nds->SetFirmware(std::move(image)); inst->systemFiles |= 4;
     }
@@ -1076,6 +1079,10 @@ void saveNDSToInstance(const u8* data, u32 length, void* userdata) {
     if (inst && data) inst->save.assign(data, data + length);
 }
 LocalMP& localMultiplayer() { return localMP; }
+void updateMultiplayerPeer(void* userdata) {
+    auto* inst = static_cast<Instance*>(userdata);
+    if (inst && inst->nds) localMP.SetPeer(inst->id, inst->nds->Wifi.GetMAC(), inst->nds->Wifi.GetBSSID());
+}
 }
 
 #include "workspace-native.h"

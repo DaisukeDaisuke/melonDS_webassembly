@@ -241,7 +241,7 @@ function execute(name, args) {
     const bytes = new Uint8Array(args.bytes || []);
     if (kind === undefined) throw Error('kind must be bios7, bios9 or firmware');
     return withBytes(bytes, pointer => {
-      success(call('web_system_import', id, kind, pointer, bytes.length), name);
+      success(call('web_system_import', id, kind, pointer, bytes.length, args.preserveMac ? 1 : 0), name);
       return { instanceId: id, kind: args.kind, bytes: bytes.length };
     });
   }

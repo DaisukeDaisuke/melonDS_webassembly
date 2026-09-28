@@ -17,6 +17,7 @@
 namespace melonDS::Platform {
 void saveNDSToInstance(const u8*, u32, void*);
 LocalMP& localMultiplayer();
+void updateMultiplayerPeer(void* userdata);
 static std::mutex netLock;
 static std::array<std::deque<WebNetFrame>, 16> netPending;
 static std::array<bool, 16> netEnabled = [] {
@@ -166,14 +167,14 @@ void WriteGBASave(const u8*, u32, u32, u32, void*) {}
 void WriteFirmware(const Firmware&, u32, u32, void*) {}
 void WriteDateTime(int, int, int, int, int, int, void*) {}
 static int id(void* userdata) { return userdata ? *static_cast<int*>(userdata) : -1; }
-void MP_Begin(void* userdata) { if (id(userdata) >= 0) localMultiplayer().Begin(id(userdata)); }
+void MP_Begin(void* userdata) { if (id(userdata) >= 0) { updateMultiplayerPeer(userdata); localMultiplayer().Begin(id(userdata)); } }
 void MP_End(void* userdata) { if (id(userdata) >= 0) localMultiplayer().End(id(userdata)); }
 int MP_SendPacket(u8* data, int len, u64 timestamp, void* userdata) { return localMultiplayer().SendPacket(id(userdata), data, len, timestamp); }
 int MP_RecvPacket(u8* data, u64* timestamp, void* userdata) { return localMultiplayer().RecvPacket(id(userdata), data, timestamp); }
-int MP_SendCmd(u8* data, int len, u64 timestamp, void* userdata) { return localMultiplayer().SendCmd(id(userdata), data, len, timestamp); }
-int MP_SendReply(u8* data, int len, u64 timestamp, u16 aid, void* userdata) { return localMultiplayer().SendReply(id(userdata), data, len, timestamp, aid); }
+int MP_SendCmd(u8* data, int len, u64 timestamp, void* userdata) { updateMultiplayerPeer(userdata); return localMultiplayer().SendCmd(id(userdata), data, len, timestamp); }
+int MP_SendReply(u8* data, int len, u64 timestamp, u16 aid, void* userdata) { updateMultiplayerPeer(userdata); return localMultiplayer().SendReply(id(userdata), data, len, timestamp, aid); }
 int MP_SendAck(u8* data, int len, u64 timestamp, void* userdata) { return localMultiplayer().SendAck(id(userdata), data, len, timestamp); }
-int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata) { return localMultiplayer().RecvHostPacket(id(userdata), data, timestamp); }
+int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata) { updateMultiplayerPeer(userdata); return localMultiplayer().RecvHostPacket(id(userdata), data, timestamp); }
 u16 MP_RecvReplies(u8* data, u64 timestamp, u16 mask, void* userdata) { return localMultiplayer().RecvReplies(id(userdata), data, timestamp, mask); }
 int Net_SendPacket(u8* data, int len, void* userdata) {
     const int instance = id(userdata);

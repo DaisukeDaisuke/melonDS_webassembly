@@ -62,7 +62,7 @@ export function createWorkspaceService({ api, backend, network, readUI, restoreU
         for (const record of saved.instances) {
           const instanceId = record.instanceId;
           await api.createInstance({ instanceId });
-          for (const [kind, data] of Object.entries(record.data.system)) await api.loadSystemFile({ instanceId, kind, file: new Blob([data]) });
+          for (const [kind, data] of Object.entries(record.data.system)) await api.loadSystemFile({ instanceId, kind, file: new Blob([data]), preserveMac: true });
           if (record.loaded) {
             await api.loadRom({ instanceId, file: saved.roms[record.rom] });
             await api.pause({ instanceId });

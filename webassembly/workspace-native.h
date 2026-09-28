@@ -60,6 +60,11 @@ void workspaceTransportState(melonDS::Savestate& state) {
         if (state.Error) return;
     }
     localMP.DoTransportState(&state, melonDS::Platform::WebSemaphoreState);
+    // These addresses are already part of the restored radio state. Rebuild
+    // derived routing metadata without changing the v3 workspace format.
+    if (!state.Saving && !state.Error)
+        for (auto& owner : instances) if (owner)
+            localMP.SetPeer(owner->id, owner->nds->Wifi.GetMAC(), owner->nds->Wifi.GetBSSID());
     melonDS::Platform::WebNetDoTransportState(&state);
 }
 bool workspaceLock(std::vector<std::unique_lock<std::mutex>>& locks) {

@@ -68,6 +68,41 @@ function errorMessage(error) {
   $('#notice').hidden = false;
 }
 function save() { saveLayout(layout); }
+function linkedInputTargets(instanceId) {
+  // Links form an undirected component, not a chain of forwarded key events.
+  // Resolve IDs once per input edge: cycles and duplicate screen tiles cannot
+  // deliver a key twice, and input from either end reaches the whole group.
+  const group = new Set([instanceId]);
+  let changed;
+  do {
+    changed = false;
+    for (const tile of layout.tiles) {
+      const other = tile.settings.inputLink;
+      if (tile.type !== 'screen' || !Number.isInteger(other) || other < 0 || other >= MAX_INSTANCES) continue;
+      if (!group.has(tile.instanceId) && !group.has(other)) continue;
+      const size = group.size;
+      group.add(tile.instanceId); group.add(other);
+      changed ||= group.size !== size;
+    }
+  } while (changed);
+  return state.instances.filter(id => group.has(id));
+}
+const keyOwners = new Map();
+function linkedKey(owner, ids, key, pressed) {
+  const requests = [];
+  for (const instanceId of ids) {
+    const address = `${instanceId}:${key}`;
+    let owners = keyOwners.get(address);
+    if (!owners) { if (!pressed) continue; keyOwners.set(address, owners = new Set()); }
+    const wasPressed = owners.size > 0;
+    if (pressed) owners.add(owner); else owners.delete(owner);
+    const isPressed = owners.size > 0;
+    if (!isPressed) keyOwners.delete(address);
+    if (wasPressed !== isPressed && state.instances.includes(instanceId))
+      requests.push(api.input({ instanceId, key, pressed: isPressed }));
+  }
+  return Promise.all(requests);
+}
 function updateScreenTargets() {
   backend.setScreenTargets([...new Set(layout.tiles.filter(tile => tile.type === 'screen' && !tile.minimized)
     .map(tile => tile.instanceId))]);
@@ -324,7 +359,7 @@ function renderBody(body, tile, tileElement) {
       toolbar.append(button(label, () => fileInput.click()), fileInput);
     }
     const frameLabel = el('span', 'screen-state', '—'); toolbar.append(frameLabel);
-    const destroy = button('中断', async () => { const id = tile.instanceId; release(); audio.disable(id); await api.destroyInstance({ instanceId: id }); });
+    const destroy = button('中断', async () => { const id = tile.instanceId; await release(); audio.disable(id); await api.destroyInstance({ instanceId: id }); });
     destroy.className = 'screen-destroy'; destroy.title = '実行を停止し、このエミュレーターを破棄'; toolbar.append(destroy);
     const footer = el('div', 'screen-footer');
     const filename = el('span', '', state.names.get(tile.instanceId) || 'ROM未読込');
@@ -337,8 +372,11 @@ function renderBody(body, tile, tileElement) {
     linkInput.append(new Option('入力連動なし', ''));
     for (let id = 0; id < MAX_INSTANCES; id++) linkInput.append(new Option(`#${id} と連動`, String(id)));
     linkInput.value = Number.isInteger(tile.settings.inputLink) ? String(tile.settings.inputLink) : '';
-    linkInput.onchange = () => { release(); tile.settings.inputLink = linkInput.value === '' ? null : Number(linkInput.value); save(); };
-    const targets = () => [...new Set([tile.instanceId, tile.settings.inputLink].filter(id => Number.isInteger(id) && state.instances.includes(id)))];
+    linkInput.onchange = () => void apply(linkInput, async () => {
+      await Promise.all([...workspace.querySelectorAll('.tile')].map(node => node._releaseInput?.()));
+      tile.settings.inputLink = linkInput.value === '' ? null : Number(linkInput.value); save();
+    });
+    const targets = () => linkedInputTargets(tile.instanceId);
     footer.append(filename, button('キー入力', () => stack.focus({ preventScroll: true })), linkInput, toggleAudio);
     stack.append(top, bottom);
     const warning = el('div', 'state-warning'); warning.hidden = true; warning.setAttribute('role', 'alert');
@@ -366,14 +404,15 @@ function renderBody(body, tile, tileElement) {
     const keymap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', KeyX: 'A', KeyZ: 'B', KeyS: 'X', KeyA: 'Y', KeyQ: 'L', KeyW: 'R', Enter: 'START', ShiftLeft: 'SELECT', ShiftRight: 'SELECT' };
     stack.addEventListener('keydown', event => {
       const key = keymap[event.code]; if (!key) return;
-      event.preventDefault(); if (held.has(key)) return;
-      const ids = targets(); held.set(key, ids);
-      for (const instanceId of ids) void apply(null, () => api.input({ instanceId, key, pressed: true }));
+      event.preventDefault(); if (held.has(event.code)) return;
+      const input = { key, ids: targets(), owner: Symbol(event.code) }; held.set(event.code, input);
+      void apply(null, () => linkedKey(input.owner, input.ids, key, true));
     });
     stack.addEventListener('keyup', event => {
       const key = keymap[event.code]; if (!key) return;
-      event.preventDefault(); const ids = held.get(key) || targets(); held.delete(key);
-      for (const instanceId of ids) void apply(null, () => api.input({ instanceId, key, pressed: false }));
+      event.preventDefault(); const input = held.get(event.code); if (!input) return;
+      held.delete(event.code);
+      void apply(null, () => linkedKey(input.owner, input.ids, input.key, false));
     });
     let touchPointer = null, touchedInstances = [], pendingTouch = null, touchFrame = 0;
     const touchQueue = [];
@@ -394,7 +433,7 @@ function renderBody(body, tile, tileElement) {
     };
     const release = () => {
       const releases = [];
-      for (const [key, ids] of held) for (const instanceId of ids) releases.push(api.input({ instanceId, key, pressed: false }).catch(() => {}));
+      for (const input of held.values()) releases.push(linkedKey(input.owner, input.ids, input.key, false).catch(() => {}));
       held.clear();
       cancelAnimationFrame(touchFrame); touchFrame = 0; pendingTouch = null;
       if (touchedInstances.length) sendTouch({ x: 0, y: 0, pressed: false });
@@ -523,23 +562,38 @@ function renderBody(body, tile, tileElement) {
     act('削除', () => api.removeBreakpoint(args({ address: hex(address) })));
     act('一覧', () => api.listBreakpoints(args()));
   } else if (tile.type === 'input') {
+    let sequenceTargets = [];
+    const stopSequence = async () => {
+      const ids = [...new Set([...sequenceTargets, ...linkedInputTargets(tile.instanceId)])];
+      sequenceTargets = [];
+      return Promise.all(ids.filter(id => state.instances.includes(id)).map(instanceId => api.stopInputSequence({ instanceId })));
+    };
+    const keyReleases = [];
+    tileElement._releaseInput = () => Promise.all(keyReleases.map(release => release()));
     act('記録開始', () => api.startInputRecording(args()));
     act('記録停止', () => api.stopInputRecording(args()));
     act('入力履歴', () => api.getInputRecording(args()));
     act('記録を再生', async () => {
       const recording = await api.getInputRecording(args());
       if (recording.truncated) throw Error('入力記録が上限を超えています');
-      return api.inputSequence(args({ events: recording.events }));
+      sequenceTargets = linkedInputTargets(tile.instanceId);
+      return Promise.all(sequenceTargets.map(instanceId => api.inputSequence({ instanceId, events: recording.events })));
     });
-    act('再生停止', () => api.stopInputSequence(args()));
+    act('再生停止', stopSequence);
     for (const key of ['A', 'B', 'X', 'Y', 'L', 'R', 'START', 'SELECT', 'UP', 'DOWN', 'LEFT', 'RIGHT']) {
       const item = el('button', '', key); item.type = 'button';
       let pressed = false;
+      let pressedTargets = [];
+      const owner = Symbol(key);
       const set = active => {
         if (pressed === active) return;
         pressed = active; item.setAttribute('aria-pressed', String(active));
-        void apply(null, () => api.input(args({ key, pressed: active })));
+        if (active) pressedTargets = linkedInputTargets(tile.instanceId);
+        const targets = pressedTargets;
+        if (!active) pressedTargets = [];
+        return apply(null, () => linkedKey(owner, targets, key, active));
       };
+      keyReleases.push(() => set(false));
       item.addEventListener('pointerdown', event => {
         if (event.button !== 0) return;
         item.setPointerCapture(event.pointerId); set(true);
@@ -564,7 +618,14 @@ function renderBody(body, tile, tileElement) {
     const repeatCount = textInput(repeatControls, '回数', '120'); repeatCount.type = 'number'; repeatCount.min = 1; repeatCount.max = 50000;
     const pressFrames = textInput(repeatControls, '押下フレーム数', '2'); pressFrames.type = 'number'; pressFrames.min = 1;
     const releaseFrames = textInput(repeatControls, '解放フレーム数', '2'); releaseFrames.type = 'number'; releaseFrames.min = 1;
-    repeatControls.append(button('連打', async () => { const target = args(); await api.repeatInput({ ...target, keys: [repeatKey.value], count: Number(repeatCount.value), pressFrames: Number(pressFrames.value), releaseFrames: Number(releaseFrames.value) }); await api.resume(target); output.textContent = `${repeatKey.value} × ${repeatCount.value} 回`; }), button('連打を停止', async () => { await api.stopInputSequence(args()); output.textContent = '連打を停止しました'; }));
+    repeatControls.append(button('連打', async () => {
+      sequenceTargets = linkedInputTargets(tile.instanceId);
+      await Promise.all(sequenceTargets.map(async instanceId => {
+        await api.repeatInput({ instanceId, keys: [repeatKey.value], count: Number(repeatCount.value), pressFrames: Number(pressFrames.value), releaseFrames: Number(releaseFrames.value) });
+        await api.resume({ instanceId });
+      }));
+      output.textContent = `${repeatKey.value} × ${repeatCount.value} 回`;
+    }), button('連打を停止', async () => { await stopSequence(); output.textContent = '連打を停止しました'; }));
   } else if (tile.type === 'state') {
     const slot = textInput(controls, 'スロット (0-9)', '0');
     act('ステート保存', () => api.saveState(args({ slot: Number(slot.value) })));
