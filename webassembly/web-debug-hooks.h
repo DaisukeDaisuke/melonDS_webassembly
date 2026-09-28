@@ -9,5 +9,6 @@ namespace WebDebugger {
 bool BeforeInstruction(ARM* cpu, u32 address);
 void AfterInstruction(ARM* cpu, u32 address);
 void MemoryAccess(ARM* cpu, u32 address, u32 size, bool write);
+bool Exception(ARM* cpu, int kind, u32 address);
 }
 }
