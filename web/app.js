@@ -21,6 +21,13 @@ const layout = loadLayout();
 const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], names: new Map(), logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
+const LOG_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 2000 });
+const LOG_RENDER_LIMIT = 100;
+const LOCAL_PACKET_NAMES = Object.freeze(['PACKET', 'CMD', 'REPLY', 'ACK']);
+function retainLogs(type, list) {
+  const limit = LOG_RETENTION[type] || 2000;
+  if (list.length > limit) list.splice(0, list.length - limit);
+}
 const dirtyLogs = new Set();
 let logRepaint = 0;
 function queueLogUpdate(type) {
@@ -41,7 +48,7 @@ globalThis.melonds = api;
 globalThis.melondsVirtualNetwork = createVirtualNetwork(api, { onEvent: event => {
   if (event.type !== 'wifi-log') return;
   state.logs['wifi-log'].push(event);
-  if (state.logs['wifi-log'].length > 2000) state.logs['wifi-log'].splice(0, state.logs['wifi-log'].length - 2000);
+  retainLogs('wifi-log', state.logs['wifi-log']);
   queueLogUpdate('wifi-log');
 } });
 globalThis.melondsFiles = globalThis.melondsVirtualNetwork.files;
@@ -166,6 +173,13 @@ function download(data, name, type = 'application/octet-stream') {
   link.href = url; link.download = name; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
+function csvField(value) {
+  const text = String(value ?? '');
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+function localPacketName(packet) {
+  return String(packet.packetType || 'PACKET');
+}
 
 function populateInstances(select, chosen) {
   select.replaceChildren();
@@ -199,6 +213,37 @@ function renderLog(body, tile) {
   const decodedOnly = el('input'); decodedOnly.type = 'checkbox'; decodedOnly.checked = !!tile.settings.decodedOnly;
   if (tile.type === 'wifi-log') { const label = el('label', '', ' 復号・再構成済み'); label.prepend(decodedOnly); controls.append(label); }
   controls.append(button('消去', () => { state.logs[tile.type] = []; update(); }));
+  if (tile.type === 'local-log') {
+    const exportFilter = el('details', 'packet-export-filter');
+    exportFilter.append(el('summary', '', 'CSV対象'));
+    const exportOptions = el('div', 'packet-export-options');
+    for (const packetName of LOCAL_PACKET_NAMES) {
+      const label = el('label');
+      const checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.value = packetName; checkbox.checked = true;
+      label.append(checkbox, document.createTextNode(` ${packetName}`));
+      exportOptions.append(label);
+    }
+    exportFilter.append(exportOptions); controls.append(exportFilter);
+    controls.append(button('CSV出力', () => {
+      const selected = new Set([...exportOptions.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value));
+      if (!selected.size) throw Error('CSVに出力するパケット名を1つ以上選択してください');
+      const entries = state.logs['local-log'].filter(packet => selected.has(localPacketName(packet)) &&
+        (tile.settings.all || packet.instanceId === tile.instanceId || packet.destination === tile.instanceId));
+      if (!entries.length) throw Error('選択条件に一致するパケットがありません');
+      const lines = [['timestamp', 'direction', 'sender', 'destination', 'packet_name', 'raw_type', 'sequence', 'length', 'dropped', 'payload_hex'].join(',')];
+      for (const packet of entries) {
+        const rawType = Number.isInteger(packet.rawType) ? `0x${packet.rawType.toString(16).padStart(8, '0')}` : '';
+        const payload = Array.from(packet.payload || [], byte => byte.toString(16).padStart(2, '0')).join(' ');
+        lines.push([
+          packet.timestamp, packet.direction || 'TX', packet.senderId ?? packet.instanceId ?? '',
+          packet.destination ?? '*', localPacketName(packet), rawType, packet.sequence ?? '',
+          packet.length ?? packet.payload?.length ?? 0, packet.dropped ?? '', payload
+        ].map(csvField).join(','));
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      download(`\ufeff${lines.join('\r\n')}\r\n`, `melonds-local-packets-${stamp}.csv`, 'text/csv;charset=utf-8');
+    }));
+  }
   if (tile.type === 'wifi-log') {
     controls.append(button('DQ9 WFC 接続', async () => {
       await globalThis.melondsVirtualNetwork.registerDq9WfcFromSameOrigin({ instanceId: tile.instanceId });
@@ -216,8 +261,14 @@ function renderLog(body, tile) {
   const cachedRows = new WeakMap();
   function update() {
     if (tile.settings.paused) return;
-    const entries = state.logs[tile.type].filter(packet => (!tile.settings.decodedOnly || packet.logical) &&
-      (tile.settings.all || packet.instanceId === tile.instanceId || packet.destination === tile.instanceId)).slice(-100);
+    const entries = [];
+    const log = state.logs[tile.type];
+    for (let index = log.length - 1; index >= 0 && entries.length < LOG_RENDER_LIMIT; index--) {
+      const packet = log[index];
+      if ((!tile.settings.decodedOnly || packet.logical) &&
+        (tile.settings.all || packet.instanceId === tile.instanceId || packet.destination === tile.instanceId)) entries.push(packet);
+    }
+    entries.reverse();
     empty.hidden = !!entries.length;
     const rows = entries.map(packet => {
       let tr = cachedRows.get(packet);
@@ -977,7 +1028,7 @@ api.subscribe(event => {
   }
   if (!['local-log', 'wifi-log'].includes(event.type) || !Number.isInteger(event.instanceId)) return;
   const list = state.logs[event.type]; list.push(event);
-  if (list.length > 2000) list.splice(0, list.length - 2000);
+  retainLogs(event.type, list);
   queueLogUpdate(event.type);
 });
 renderLayout();

@@ -24,6 +24,11 @@ const inputWaiters = new Map();
 const cancelledOperations = new Set();
 const freezes = Array.from({ length: 16 }, () => new Map());
 const history = { 'local-log': [], 'wifi-log': [] };
+const HISTORY_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 2000 });
+function retainHistory(type, entries) {
+  const limit = HISTORY_RETENTION[type] || 2000;
+  if (entries.length > limit) entries.splice(0, entries.length - limit);
+}
 const masks = Array(16).fill(0xfff);
 const buttons = { A: 0, B: 1, SELECT: 2, START: 3, RIGHT: 4, LEFT: 5, UP: 6, DOWN: 7, R: 8, L: 9, X: 10, Y: 11 };
 const call = (name, ...args) => wasm[`_${name}`](...args);
@@ -640,7 +645,7 @@ function drainLogs(force = false) {
   if (events.length) {
     const entries = history['local-log'];
     entries.push(...events);
-    if (entries.length > 2000) entries.splice(0, entries.length - 2000);
+    retainHistory('local-log', entries);
     const logToken = ++notificationSerial;
     pendingLogBatches.add(logToken);
     postMessage({ type: 'events', events, logToken });
@@ -650,7 +655,7 @@ function emit(event) {
   const entries = history[event.type];
   if (entries) {
     entries.push(event);
-    if (entries.length > 2000) entries.splice(0, entries.length - 2000);
+    retainHistory(event.type, entries);
   }
   postMessage({ type: 'event', event });
 }
