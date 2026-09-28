@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 #include <emscripten/emscripten.h>
+#include "call-stack-lens.h"
 
 namespace {
 struct Freeze {
@@ -70,7 +71,7 @@ struct Instance {
     std::unique_lock<std::mutex>* frameLock = nullptr; // runner thread only
     bool frameActive = false; // debugMutex
     bool debugSuspended = false; // debugMutex
-    bool abortFrame = false; // debugMutex
+    std::atomic<bool> abortFrame {false};
     bool checkpointRequested = false; // debugMutex
     bool checkpointMode = false; // coreMutex
     int checkpointSlot = 0; // coreMutex
@@ -85,7 +86,7 @@ struct Instance {
     int watchKind = 0; // coreMutex
     unsigned watchId = 0; // coreMutex
     unsigned watchAddress = 0; // coreMutex
-    std::array<std::vector<TraceFrame>, 2> callTrace;
+    std::array<CallStackLens<TraceFrame>, 2> callTrace;
     std::array<unsigned, 2> beforeLr {};
     std::array<bool, 2> beforeThumb {};
     std::mutex coreMutex;
@@ -96,6 +97,11 @@ struct Instance {
     std::atomic<bool> paused {true};
     std::atomic<bool> romLoaded {false};
     std::atomic<unsigned> completedFrames {0};
+    // Presentation is published at a frame boundary. Reading a window must
+    // never wait for another instance's interpreter or LocalMP receive.
+    std::mutex videoMutex;
+    std::array<melonDS::u8, 256 * 192 * 4 * 2> video {};
+    bool videoValid = false;
 };
 std::array<std::unique_ptr<Instance>, 16> instances;
 melonDS::LocalMP localMP;
@@ -105,6 +111,15 @@ std::vector<DebugEvent> drainedDebugEvents;
 unsigned debugEventsDropped = 0;
 unsigned drainedDebugDropped = 0;
 Instance* get(int id) { return id >= 0 && id < 16 ? instances[id].get() : nullptr; }
+void publishFrame(Instance* inst) {
+    void* top = nullptr; void* bottom = nullptr;
+    if (!inst->nds->GPU.GetFramebuffers(&top, &bottom) || !top || !bottom) return;
+    std::lock_guard<std::mutex> lock(inst->videoMutex);
+    constexpr size_t bytes = 256 * 192 * 4;
+    std::memcpy(inst->video.data(), top, bytes);
+    std::memcpy(inst->video.data() + bytes, bottom, bytes);
+    inst->videoValid = true;
+}
 void queueDebugEvent(const DebugEvent& event) {
     std::lock_guard<std::mutex> lock(debugEventMutex);
     if (debugEvents.size() == 1024) {
@@ -171,6 +186,7 @@ void runFrames(Instance* inst) {
                     inst->frameLock = &guard;
                 }
                 inst->nds->RunFrame();
+                publishFrame(inst);
                 if (inst->checkpointMode) {
                     const int result = saveStateLocked(inst, inst->checkpointSlot);
                     inst->checkpointMode = false;
@@ -197,7 +213,9 @@ void runFrames(Instance* inst) {
             else if (!inst->nds->IsRunning()) inst->paused = true;
         }
         next += std::chrono::microseconds(16742);
-        if (next < clock::now()) next = clock::now();
+        // Preserve the deadline across small overruns instead of accumulating
+        // sleep jitter into a slower emulation/audio clock.
+        if (next + std::chrono::milliseconds(100) < clock::now()) next = clock::now();
         std::this_thread::sleep_until(next);
     }
 }
@@ -216,6 +234,7 @@ int loadStateLocked(Instance* inst, int slot) {
         inst->skipCpu = 0; inst->watchKind = 0;
         for (auto& trace : inst->callTrace) trace.clear();
         inst->completedFrames = inst->nds->NumFrames;
+        publishFrame(inst);
         return 0;
     }
     melonDS::Savestate restore(rollback.Buffer(), rollback.Length(), false);
@@ -254,12 +273,9 @@ bool park(Instance* inst, ARM* cpu, int kind, unsigned id, unsigned address, uns
 bool BeforeInstruction(ARM* cpu, u32 address) {
     auto* inst = static_cast<Instance*>(cpu->NDS.UserData);
     if (!inst) return true;
-    {
-        std::lock_guard<std::mutex> state(inst->debugMutex);
-        if (inst->abortFrame || !inst->alive.load()) {
-            inst->nds->Stop();
-            return false;
-        }
+    if (inst->abortFrame.load(std::memory_order_relaxed) || !inst->alive.load(std::memory_order_relaxed)) {
+        inst->nds->Stop();
+        return false;
     }
     if (inst->checkpointMode) return true;
     const int which = cpu->Num ? 7 : 9;
@@ -313,21 +329,22 @@ void AfterInstruction(ARM* cpu, u32 address) {
     if (inst->checkpointMode) { inst->watchKind = 0; return; }
     const unsigned opcode = cpu->CurInstr;
     const bool thumb = inst->beforeThumb[cpu->Num];
-    const bool call = thumb ? ((opcode & 0xf800) == 0xf800 || (opcode & 0xff87) == 0x4780)
+    const bool call = thumb ? ((opcode & 0xf800) == 0xf800 || (opcode & 0xf800) == 0xe800 || (opcode & 0xff87) == 0x4780)
         : ((opcode & 0x0f000000) == 0x0b000000
             || (opcode & 0xfe000000) == 0xfa000000
             || (opcode & 0x0ffffff0) == 0x012fff30);
     const unsigned target = cpu->R[15] - ((cpu->CPSR & 0x20) ? 2 : 4);
     auto& trace = inst->callTrace[cpu->Num];
-    if (call && cpu->R[14] != inst->beforeLr[cpu->Num]) {
-        if (trace.size() >= 128) trace.erase(trace.begin());
-        trace.push_back({address, target, cpu->R[14] & ~1u, cpu->R[13], cpu->CPSR});
-    } else {
-        for (size_t i = trace.size(); i > 0; --i) {
-            if (trace[i - 1].returnAddress == (target & ~1u)) {
-                trace.resize(i - 1); break;
-            }
-        }
+    trace.tick(cpu->R[13], target, cpu->CPSR);
+    if (call && (cpu->R[14] != inst->beforeLr[cpu->Num] || target != address + (thumb ? 2u : 4u))) {
+        trace.call({thumb && ((opcode & 0xf800) == 0xf800 || (opcode & 0xf800) == 0xe800) ? address - 2 : address, target, cpu->R[14] & ~1u, cpu->R[13], cpu->CPSR});
+    } else if (target != address + (thumb ? 2u : 4u)) {
+        const bool indirect = thumb ? ((opcode & 0xff00) == 0x4700 || (opcode & 0xff00) == 0xbd00 || (opcode & 0xff87) == 0x4687)
+            : ((opcode & 0x0ffffff0) == 0x012fff10 || ((opcode & 0x0c000000) == 0 && (opcode & 0xf000) == 0xf000)
+               || ((opcode & 0x0e108000) == 0x08108000) || ((opcode & 0x0c10f000) == 0x0410f000));
+        trace.branch(target, cpu->R[13], cpu->CPSR, indirect);
+    } else if (thumb ? (opcode & 0xff00) == 0xb500 : (opcode & 0x0fff4000) == 0x092d4000) {
+        trace.enter({address, address, cpu->R[14] & ~1u, cpu->R[13], cpu->CPSR});
     }
     if (inst->watchKind) {
         const int kind = inst->watchKind;
@@ -420,6 +437,7 @@ EMSCRIPTEN_KEEPALIVE int web_reset(int id) {
     if (inst->nds->CartInserted()) inst->nds->SetupDirectBoot("web.nds");
     inst->nds->Start(); inst->paused = paused;
     inst->completedFrames = inst->nds->NumFrames;
+    publishFrame(inst);
     if (!paused) inst->wake.notify_one();
     return 0;
 }
@@ -532,18 +550,65 @@ EMSCRIPTEN_KEEPALIVE int web_debug_event_entry(int index, unsigned* output) {
 EMSCRIPTEN_KEEPALIVE int web_call_stack_count(int id, int cpu) {
     auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9)) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
-    return static_cast<int>(inst->callTrace[cpu == 9 ? 0 : 1].size());
+    return static_cast<int>(inst->callTrace[cpu == 9 ? 0 : 1].frames().size());
 }
 EMSCRIPTEN_KEEPALIVE int web_call_stack_entry(int id, int cpu, int index, unsigned* output) {
     auto* inst = get(id); if (!inst || !output || (cpu != 7 && cpu != 9)) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
-    const auto& frames = inst->callTrace[cpu == 9 ? 0 : 1];
+    const auto& frames = inst->callTrace[cpu == 9 ? 0 : 1].frames();
     if (index < 0 || static_cast<size_t>(index) >= frames.size()) return -1;
     const auto& frame = frames[frames.size() - 1 - index];
     output[0] = frame.caller; output[1] = frame.callee;
     output[2] = frame.returnAddress; output[3] = frame.sp;
     output[4] = frame.cpsr;
     return 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_call_stack_snapshot(int id, int cpu, unsigned* out, int capacity, int limit) {
+    auto* inst = get(id);
+    if (!inst || !out || (cpu != 7 && cpu != 9) || limit < 1 || limit > 128) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    const auto& lens = inst->callTrace[cpu == 9 ? 0 : 1];
+    size_t required = 3;
+    for (const auto& lane : lens.lanes) required += 5 + std::min(lane.frames.size(), static_cast<size_t>(limit)) * 5;
+    if (capacity < 0 || required > static_cast<size_t>(capacity)) return -2;
+    unsigned cursor = 0, total = 0;
+    for (const auto& lane : lens.lanes) total += lane.frames.size();
+    out[cursor++] = lens.lanes.size();
+    out[cursor++] = lens.lanes.empty() ? 0 : lens.lanes[lens.active].id;
+    out[cursor++] = total;
+    for (const auto& lane : lens.lanes) {
+        const auto count = std::min(lane.frames.size(), static_cast<size_t>(limit));
+        out[cursor++] = lane.id; out[cursor++] = lane.lastSp; out[cursor++] = lane.nowPc;
+        out[cursor++] = lane.cpsr; out[cursor++] = count;
+        for (size_t i = 0; i < count; ++i) {
+            const auto& frame = lane.frames[lane.frames.size() - 1 - i];
+            out[cursor++] = frame.caller; out[cursor++] = frame.callee; out[cursor++] = frame.returnAddress;
+            out[cursor++] = frame.sp; out[cursor++] = frame.cpsr;
+        }
+    }
+    return cursor;
+}
+EMSCRIPTEN_KEEPALIVE double web_cpu_info(int id, int cpu, int field) {
+    auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9)) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    auto& n = *inst->nds;
+    auto* arm = cpu == 9 ? static_cast<melonDS::ARM*>(n.ARM9) : n.ARM7;
+    switch (field) {
+    case 0: return arm->Halted;
+    case 1: return arm->IRQ;
+    case 2: return cpu == 9 ? n.ARM9Timestamp : n.ARM7Timestamp;
+    case 3: return cpu == 9 ? n.ARM9Target : n.ARM7Target;
+    case 4: return n.ARM7Timestamp;
+    case 5: return n.CPUStop;
+    case 6: return n.ARM9ClockShift;
+    case 7: return arm->IdleLoop;
+    case 8: return n.IME[cpu == 9 ? 0 : 1];
+    case 9: return n.IE[cpu == 9 ? 0 : 1];
+    case 10: return n.IF[cpu == 9 ? 0 : 1];
+    case 11: return cpu == 9 ? n.ARM9IORead16(0x04000184) : n.ARM7IORead16(0x04000184);
+    case 12: return cpu == 9 ? n.ARM9IORead16(0x04000180) : n.ARM7IORead16(0x04000180);
+    default: return -1;
+    }
 }
 EMSCRIPTEN_KEEPALIVE int web_register(int id, int cpu, int reg) {
     auto* inst = get(id); if (!inst || (cpu != 7 && cpu != 9) || reg < 0 || reg > 16) return 0;
@@ -564,7 +629,8 @@ EMSCRIPTEN_KEEPALIVE int web_set_register(int id, int cpu, int reg, unsigned val
 EMSCRIPTEN_KEEPALIVE int web_read_memory(int id, int cpu, unsigned address, melonDS::u8* out, int length) {
     auto* inst = get(id); if (!inst || !out || (cpu != 7 && cpu != 9) || length < 0 || length > 4096) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
-    for (int n = 0; n < length; n++) out[n] = cpu == 9 ? inst->nds->ARM9Read8(address + n) : inst->nds->ARM7Read8(address + n);
+    auto* arm = cpu == 9 ? static_cast<melonDS::ARM*>(inst->nds->ARM9) : inst->nds->ARM7;
+    for (int n = 0; n < length; n++) out[n] = static_cast<melonDS::u8>(arm->ReadMem(address + n, 8));
     return length;
 }
 EMSCRIPTEN_KEEPALIVE int web_write_memory(int id, int cpu, unsigned address, const melonDS::u8* in, int length) {
@@ -572,8 +638,8 @@ EMSCRIPTEN_KEEPALIVE int web_write_memory(int id, int cpu, unsigned address, con
     auto* inst = get(id); if (!inst || !in || (cpu != 7 && cpu != 9) || length < 0 || length > 4096) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     for (int n = 0; n < length; n++) {
-        if (cpu == 9) inst->nds->ARM9Write8(address + n, in[n]);
-        else inst->nds->ARM7Write8(address + n, in[n]);
+        if (cpu == 9) inst->nds->ARM9->WriteMem(address + n, 8, in[n]);
+        else inst->nds->ARM7->WriteMem(address + n, 8, in[n]);
     }
     return length;
 }
@@ -749,6 +815,7 @@ EMSCRIPTEN_KEEPALIVE int web_state_import(int id, int slot, const melonDS::u8* d
             inst->nds->DoSavestate(&restore);
         }
         inst->completedFrames = inst->nds->NumFrames;
+        publishFrame(inst);
         return result;
     }
     auto previous = std::move(inst->states[slot]);
@@ -782,17 +849,14 @@ EMSCRIPTEN_KEEPALIVE int web_save_import(int id, const melonDS::u8* data, int le
 EMSCRIPTEN_KEEPALIVE int web_copy_frame(int id, melonDS::u8* destination, int capacity) {
     constexpr int kOneScreenBytes = 256 * 192 * 4;
     auto* inst = get(id); if (!inst || !destination || capacity < kOneScreenBytes * 2) return -1;
-    std::lock_guard<std::mutex> guard(inst->coreMutex);
-    void* top = nullptr; void* bottom = nullptr;
-    if (!inst->nds->GPU.GetFramebuffers(&top, &bottom)) return -2;
-    if (!top || !bottom) return -2;
-    memcpy(destination, top, kOneScreenBytes);
-    memcpy(destination + kOneScreenBytes, bottom, kOneScreenBytes);
+    std::lock_guard<std::mutex> guard(inst->videoMutex);
+    if (!inst->videoValid) return -2;
+    memcpy(destination, inst->video.data(), kOneScreenBytes * 2);
     return kOneScreenBytes * 2;
 }
 EMSCRIPTEN_KEEPALIVE int web_read_audio(int id, melonDS::s16* destination, int frames) {
     auto* inst = get(id); if (!inst || !destination || frames < 1 || frames > 4096) return -1;
-    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    // SPU::ReadOutput owns AudioLock. The dispatcher serializes destruction.
     return inst->nds->SPU.ReadOutput(destination, frames);
 }
 static std::array<melonDS::LocalMP::PacketLogEntry, melonDS::LocalMP::kLogCapacity> logs;

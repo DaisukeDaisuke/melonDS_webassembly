@@ -14,7 +14,7 @@ const ip = address => Uint8Array.from(address.split('.').map(Number));
 const equals = (a, b) => a.length === b.length && a.every((n, i) => n === b[i]);
 const text = new TextDecoder();
 
-export function createTcpService({ address, mac, onRequest, createSecureSession, emitFrame }) {
+export function createTcpService({ address, mac, onRequest, createSecureSession, emitFrame, onDiagnostic = () => {} }) {
   const serverIp = ip(address);
   const serverMac = Uint8Array.from(mac);
   const connections = new Map();
@@ -23,6 +23,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     const now = Date.now();
     for (const [key, connection] of connections) {
       if (now - connection.lastSeen > 120000 || connection.inflight?.retries >= 8) {
+        onDiagnostic(`Connection timeout ${key}`);
         connections.delete(key);
         continue;
       }
@@ -137,9 +138,14 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     const flags = frame[offset + 13], clientSeq = read32(frame, offset + 4);
     if (flags & 0x04) { connections.delete(key); return null; }
     if (flags & 0x02) {
+      const existing = connections.get(key);
+      if (existing && existing.initialClientSeq === clientSeq && existing.synReply) {
+        existing.lastSeen = Date.now();
+        return existing.synReply;
+      }
       if (connections.size >= 64 && !connections.has(key)) return null;
       const connection = { mac: frame.slice(6, 12), clientIp: clientIp.slice(), clientPort, port,
-        lastSeen: Date.now(),
+        lastSeen: Date.now(), initialClientSeq: clientSeq,
         ack: (clientSeq + 1) >>> 0, seq: (Math.random() * 0xffffffff) >>> 0,
         ipId: 1, inflight: null, request: new Uint8Array(), output: null, queue: [],
         closing: false, position: 0, finSent: false,
@@ -147,6 +153,8 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
       connections.set(key, connection);
       if (emitFrame && !retransmitTimer) retransmitTimer = setInterval(tick, 250);
       const reply = packet(connection, 0x12);
+      connection.synReply = reply;
+      onDiagnostic(`SYN ${key} → SYN ACK`);
       connection.seq = (connection.seq + 1) >>> 0;
       connection.inflight = inFlight(connection.seq, reply);
       return reply;
@@ -174,7 +182,8 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
           const { bytes, close } = await connection.secure.receive(payload);
           if (bytes.length) connection.queue.push(bytes);
           if (close) connection.closing = true;
-        } catch {
+        } catch (error) {
+          onDiagnostic(`SSL ${key}: ${error.message || error}`);
           connections.delete(key);
           return packet(connection, 0x14);
         }
@@ -182,13 +191,14 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
         try {
           const request = requestReady(connection);
           if (request) { connection.queue.push(await onRequest(request)); connection.closing = true; }
-        } catch {
+        } catch (error) {
+          onDiagnostic(`HTTP ${key}: ${error.message || error}`);
           connections.delete(key);
           return packet(connection, 0x14);
         }
       }
     } else if (payload.length && clientSeq !== connection.ack) replies.push(packet(connection, 0x10));
-    if (flags & 0x01) {
+    if ((flags & 0x01) && ((clientSeq + payload.length) >>> 0) === connection.ack) {
       connection.ack = (connection.ack + 1) >>> 0;
       replies.push(packet(connection, 0x10));
       if (connection.finSent && !connection.inflight) connections.delete(key);

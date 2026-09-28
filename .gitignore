@@ -9,3 +9,5 @@
 /web/dist/*
 !/web/dist/.gitkeep
 /web/sandbox/upstream/node_modules/
+/web/dq9/certs
+/webassembly/public

@@ -147,7 +147,7 @@ async function finished(master, transcript, sender) {
 const handshake = (type, body) => concat(Uint8Array.of(type), three(body.length), body);
 const record = (type, data) => concat(Uint8Array.of(type, 3, 0), word(data.length), data);
 
-export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRequest }) {
+export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRequest, onDiagnostic = () => {} }) {
   const certificate = pem(certificatePem), chain = chainPem ? pem(chainPem) : null;
   const key = integers(pem(privateKeyPem));
   return function createSession() {
@@ -182,6 +182,7 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
         const suite = ciphers.some((_, n) => n % 2 === 0 && ciphers[n] === 0 && ciphers[n + 1] === 5) ? 5
           : ciphers.some((_, n) => n % 2 === 0 && ciphers[n] === 0 && ciphers[n + 1] === 4) ? 4 : 0;
         if (!suite) throw Error('Client lacks SSL_RSA_WITH_RC4 cipher');
+        onDiagnostic(`ClientHello → SSLv3 RSA RC4 ${suite === 5 ? 'SHA' : 'MD5'} · Certificate / ServerHelloDone`);
         digest = suite === 5 ? sha : md5;
         randomServer = crypto.getRandomValues(new Uint8Array(32));
         const hello = handshake(2, concat(Uint8Array.of(3, 0), randomServer,
@@ -193,6 +194,7 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
       if (type === 16 && randomServer && !master) {
         const encrypted = body.length > 2 && read16(body, 0) === body.length - 2 ? body.subarray(2) : body;
         const preMaster = rsaDecrypt(encrypted, key);
+        onDiagnostic('ClientKeyExchange · RSA復号完了');
         if (preMaster[0] !== 3) throw Error('Invalid premaster version');
         master = await prf(preMaster, concat(randomClient, randomServer), 48);
         const macSize = digest === sha ? 20 : 16;
@@ -210,6 +212,7 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
         }
         transcript = concat(transcript, message);
         established = true;
+        onDiagnostic('Finished検証成功 · SSLv3接続確立');
         const serverDone = handshake(20, await finished(master, transcript, 'SRVR'));
         return concat(record(20, Uint8Array.of(1)), await encrypt(22, serverDone));
       }
@@ -264,7 +267,7 @@ export function createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRe
                 return { bytes: concat(...outgoing), close: true };
               }
             }
-          } else if (type === 21) return { bytes: concat(...outgoing), close: true };
+          } else if (type === 21) { onDiagnostic(`SSL Alert level ${payload[0]} description ${payload[1]}`); return { bytes: concat(...outgoing), close: true }; }
           else throw Error('Unexpected SSL record');
         }
         return { bytes: concat(...outgoing), close: false };

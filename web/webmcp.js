@@ -6,7 +6,7 @@ const bytes = { type: 'array', items: { type: 'integer', minimum: 0, maximum: 25
 const cpu = { type: 'string', enum: ['ARM9', 'ARM7'] };
 const toolInputs = {
   status: [{}, []], pause: [{}, []], resume: [{}, []], reset: [{}, []],
-  step: [{ cpu }, []], stepOver: [{ cpu }, []],
+  step: [{ cpu }, []], stepOver: [{ cpu }, []], smartStep: [{ cpu }, []],
   runUntil: [{ cpu, address: uint, timeoutMs: { type: 'integer', minimum: 1 } }, ['address']],
   readMemory: [{ cpu, address: uint, length: { type: 'integer', minimum: 1, maximum: 4096 } }, ['address', 'length']],
   writeMemory: [{ cpu, address: uint, data: bytes }, ['address', 'data']],
@@ -22,9 +22,10 @@ const toolInputs = {
   loadState: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],
   saveState: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],
   exportState: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],
-  saveStateToBrowser: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],
-  loadStateFromBrowser: [{ slot: { type: 'integer', minimum: 0, maximum: 9 } }, []],
+  saveStateToBrowser: [{ slot: { type: 'integer', minimum: 0, maximum: 9 }, name: { type: 'string', minLength: 1, maxLength: 120 } }, []],
+  loadStateFromBrowser: [{ slot: { type: 'integer', minimum: 0, maximum: 9 }, name: { type: 'string', minLength: 1, maxLength: 120 } }, []],
   input: [{ key: { type: 'string' }, pressed: { type: 'boolean' } }, ['key', 'pressed']],
+  repeatInput: [{ keys: { type: 'array', items: { type: 'string', enum: ['A','B','X','Y','L','R','START','SELECT','UP','DOWN','LEFT','RIGHT'] } }, count: { type: 'integer', minimum: 1, maximum: 50000 }, pressFrames: { type: 'integer', minimum: 1 }, releaseFrames: { type: 'integer', minimum: 1 } }, ['keys']],
   touch: [{ x: { type: 'integer', minimum: 0, maximum: 255 }, y: { type: 'integer', minimum: 0, maximum: 191 }, pressed: { type: 'boolean' } }, ['x', 'y', 'pressed']],
   inputSequence: [{ events: { type: 'array', items: { type: 'object', properties: { frame: uint, mask: uint }, required: ['frame', 'mask'] } } }, ['events']],
   waitFrames: [{ frames: { type: 'integer', minimum: 1 }, timeoutMs: uint }, ['frames']],

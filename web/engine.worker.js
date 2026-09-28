@@ -208,7 +208,7 @@ function execute(name, args) {
     if (!Number.isInteger(args.address) || args.address < 0 || args.address > 0xffffffff) throw RangeError('address must be a uint32');
     return beginDebugWait(id, name, cpu(args.cpu || 'ARM9'), args.address, args.timeoutMs);
   }
-  if (name === 'stepOver') {
+  if (name === 'stepOver' || name === 'smartStep') {
     const selectedCpu = cpu(args.cpu || 'ARM9');
     const cpsr = call('web_register', id, selectedCpu, 16) >>> 0;
     const address = call('web_register', id, selectedCpu, 15) >>> 0;
@@ -219,7 +219,7 @@ function execute(name, args) {
     });
     const opcode = data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24;
     const callInstruction = width === 2
-      ? (opcode & 0xf800) === 0xf000 && ((opcode >>> 16) & 0xf800) === 0xf800
+      ? (opcode & 0xf800) === 0xf000 && [0xf800, 0xe800].includes((opcode >>> 16) & 0xf800)
         || (opcode & 0xff87) === 0x4780
       : (opcode & 0x0f000000) === 0x0b000000 || ((opcode & 0xfe000000) >>> 0) === 0xfa000000
         || (opcode & 0x0ffffff0) === 0x012fff30;
@@ -254,24 +254,31 @@ function execute(name, args) {
   }
   if (name === 'callStack') {
     const selectedCpu = cpu(args.cpu || 'ARM9');
-    const count = success(call('web_call_stack_count', id, selectedCpu), name);
     const limit = positive(args.limit ?? 32, 128);
-    return withBytes(new Uint8Array(20), pointer => {
-      const frames = [];
-      for (let index = 0; index < Math.min(count, limit); index++) {
-        success(call('web_call_stack_entry', id, selectedCpu, index, pointer), name);
-        const view = new DataView(wasm.HEAPU8.buffer, pointer, 20);
-        frames.push({ caller: view.getUint32(0, true), callee: view.getUint32(4, true),
-          returnAddress: view.getUint32(8, true), sp: view.getUint32(12, true),
-          cpsr: view.getUint32(16, true), reconstructed: true });
+    const capacity = 3 + 128 * (5 + limit * 5);
+    return withBytes(new Uint8Array(capacity * 4), pointer => {
+      const count = success(call('web_call_stack_snapshot', id, selectedCpu, pointer, capacity, limit), name);
+      const view = new DataView(wasm.HEAPU8.buffer, pointer, count * 4);
+      let offset = 0;
+      const next = () => { const value = view.getUint32(offset, true); offset += 4; return value; };
+      const laneCount = next(), activeStackId = next(), totalDepth = next(), stacks = [];
+      for (let n = 0; n < laneCount; n++) {
+        const lane = { id: next(), sp: next(), nowPc: next(), cpsr: next(), depth: next(), frames: [] };
+        lane.active = lane.id === activeStackId;
+        for (let i = 0; i < lane.depth; i++) lane.frames.push({ caller: next(), callee: next(), returnAddress: next(), sp: next(), cpsr: next(), observed: true });
+        stacks.push(lane);
       }
-      return { instanceId: id, cpu: args.cpu || 'ARM9', frames, depth: count };
+      const active = stacks.find(lane => lane.active);
+      return { instanceId: id, cpu: args.cpu || 'ARM9', frames: active?.frames || [], depth: active?.depth || 0, totalDepth, activeStackId, stacks };
     });
   }
   if (name === 'getRegisters') {
     const registers = {};
     for (let n = 0; n < 16; n++) registers[`r${n}`] = call('web_register', id, cpu(args.cpu || 'ARM9'), n) >>> 0;
     registers.cpsr = call('web_register', id, cpu(args.cpu || 'ARM9'), 16) >>> 0;
+    if (args.includeTiming) {
+      for (const [field, key] of ['halted', 'irq', 'timestamp', 'target', 'arm7Timestamp', 'cpuStop', 'clockShift', 'idleLoop', 'ime', 'ie', 'if', 'ipcFifoControl', 'ipcSync'].entries()) registers[key] = call('web_cpu_info', id, cpu(args.cpu || 'ARM9'), field);
+    }
     return registers;
   }
   if (name === 'disassemble') {
@@ -282,7 +289,12 @@ function execute(name, args) {
     const size = Math.min(4096, count * width * (thumb ? 2 : 1));
     return withBytes(new Uint8Array(size), pointer => {
       success(call('web_read_memory', id, selectedCpu, args.address >>> 0, pointer, size), name);
-      return decodeInstructions(wasm.HEAPU8.slice(pointer, pointer + size), args.address >>> 0, count, thumb);
+      return decodeInstructions(wasm.HEAPU8.slice(pointer, pointer + size), args.address >>> 0, count, thumb, (at, op, isThumb) => {
+        const text = call('web_disassemble_opcode', at, op, isThumb ? 1 : 0);
+        let end = text;
+        while (end < text + 255 && wasm.HEAPU8[end]) end++;
+        return new TextDecoder().decode(wasm.HEAPU8.slice(text, end));
+      });
     });
   }
   if (name === 'setRegister') {
@@ -383,6 +395,21 @@ function execute(name, args) {
       return { instanceId: id, events, truncated };
     });
   }
+  if (name === 'repeatInput') {
+    const keys = args.keys ?? (args.key ? [args.key] : []);
+    if (!Array.isArray(keys) || !keys.length || keys.some(key => buttons[key] === undefined)) throw Error('keys must contain DS button names');
+    const count = positive(args.count ?? 60, 50000);
+    const press = positive(args.pressFrames ?? 2, 60000), release = positive(args.releaseFrames ?? 2, 60000);
+    if (count * (press + release) > 0xffffffff) throw Error('Input duration exceeds uint32 frame range');
+    let mask = 0xfff;
+    for (const key of keys) mask &= ~(1 << buttons[key]);
+    const events = [];
+    for (let n = 0; n < count; n++) {
+      const frame = n * (press + release);
+      events.push({ frame, mask }, { frame: frame + press, mask: 0xfff });
+    }
+    return execute('inputSequence', { ...args, events });
+  }
   if (name === 'inputSequence') {
     if (!romLoaded.has(id)) throw Error('Load a ROM first');
     const events = args.events;
@@ -405,6 +432,8 @@ function execute(name, args) {
   }
   if (name === 'stopInputSequence') {
     success(call('web_input_schedule_stop', id), name);
+    success(call('web_key_mask', id, 0xfff), name);
+    masks[id] = 0xfff;
     return { instanceId: id, stopped: true };
   }
   if (name === 'touch') {
@@ -424,9 +453,9 @@ function pollFrame(id) {
   if (!romLoaded.has(id)) return;
   const number = call('web_peek_frame_number', id);
   if (number < 0 || number === lastFrames.get(id)) return;
-  lastFrames.set(id, number);
   // A tick does not require a screen tile; persistent scripts depend on it.
   if (!visibleScreens.has(id)) {
+    lastFrames.set(id, number);
     postMessage({ type: 'event', event: { type: 'frame', instanceId: id, frame: number } });
     return;
   }
@@ -440,6 +469,7 @@ function pollFrame(id) {
     }
     const top = rgba(wasm.HEAPU8.slice(ptr, ptr + length));
     const bottom = rgba(wasm.HEAPU8.slice(ptr + length, ptr + length * 2));
+    lastFrames.set(id, number);
     postMessage({ type: 'event', event: { type: 'frame', instanceId: id, frame: number, top, bottom } }, [top.buffer, bottom.buffer]);
   } finally { call('free', ptr); }
 }

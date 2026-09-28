@@ -121,6 +121,17 @@ int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
         d.b = device.take(57);
         if (d.b.w() != 1 || d.b.w(29) || d.b.w(33)) return -22;
     }
+    // MMU v8 ends with [u32 firmware size][firmware bytes]. The radio's
+    // calibration and the game's cached RF setup must come from that same
+    // image, not from the frontend's independently generated firmware.
+    Bytes firmware{nullptr, 0, &valid};
+    const auto devices = chunk(61);
+    for (size_t size : {size_t(0x20000), size_t(0x40000), size_t(0x80000)}) {
+        if (devices.n >= size + 4 && devices.w(devices.n - size - 4) == size) {
+            firmware = devices.part(devices.n - size, size); break;
+        }
+    }
+    if (!firmware.p) return -23;
     Reader drawing{chunk(91)};
     if (drawing.w() != 4) return -23;
     const u32 vertexCount = drawing.w();
@@ -174,13 +185,22 @@ int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
 
     // Start from the core's own reset wiring, then replace hardware contents.
     // Native scheduled callbacks/renderer objects are retained, not foreign pointers.
-    n.Stop(); n.Reset(); n.SetupDirectBoot("web.nds");
+    n.Stop(); n.SetFirmware(Firmware(firmware.p, firmware.n));
+    n.Reset(); n.SetupDirectBoot("web.nds");
     memory.get("WRAM").copy(n.MainRAM, 0x400000);
     memory.get("ITCM").copy(n.ARM9->ITCM, 0x8000);
     memory.get("DTCM").copy(n.ARM9->DTCM, 0x4000);
-    mmu.get("M7WI").copy(n.ARM7WRAM, 0x10000);
+    // M7ER is the ARM7's private 64 KiB WRAM. M7WI is Wi-Fi RAM,
+    // despite its name; using it erases the ARM7 code on state import.
+    mmu.get("M7ER").copy(n.ARM7WRAM, 0x10000);
     mmu.get("MSWI").copy(n.SharedWRAM, 0x8000);
-    mmu.get("M7BI").copy(n.ARM7BIOS.data(), n.ARM7BIOS.size());
+    const auto arm7Bios = mmu.get("M7BI");
+    // DeSmuME's HLE BIOS uses self-branches at the exception vectors; its
+    // SWIs are intercepted outside that byte array. Do not replace melonDS'
+    // executable FreeBIOS with this placeholder (SWI would loop at 0x08).
+    const bool hlePlaceholder = arm7Bios.w(0) == 0xeafffffeu
+        && arm7Bios.w(4) == 0xeafffffeu && arm7Bios.w(8) == 0xeafffffeu;
+    if (!hlePlaceholder) arm7Bios.copy(n.ARM7BIOS.data(), n.ARM7BIOS.size());
     if (save.n) n.SetNDSSave(save.p, save.n);
     memory.get("VMEM").copy(n.GPU.Palette, sizeof(n.GPU.Palette));
     memory.get("OAMS").copy(n.GPU.OAM, sizeof(n.GPU.OAM));
@@ -194,11 +214,23 @@ int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
     n.ARM9->PU_DataCacheable = cp[4]; n.ARM9->PU_CodeCacheable = cp[5]; n.ARM9->PU_DataCacheWrite = cp[6];
     n.ARM9->PU_DataRW = cp[8]; n.ARM9->PU_CodeRW = cp[9];
     std::copy(cp + 10, cp + 18, n.ARM9->PU_Region);
-    n.ARM9->ITCMSetting = cp[21]; n.ARM9->DTCMSetting = cp[22]; n.ARM9->TraceProcessID = cp[23];
+    n.ARM9->ITCMSetting = cp[21];
+    // DeSmuME masks DTCMRegion with 0x0FFFF000 on MCR, discarding
+    // the size field, and always maps its 16 KiB DTCM. Restore that size;
+    // using the saved base as a hardware register maps only 4 KiB here.
+    n.ARM9->DTCMSetting = (cp[22] & 0xfffff000u) | (5u << 1);
+    n.ARM9->TraceProcessID = cp[23];
     n.ARM9->UpdateITCMSetting(); n.ARM9->UpdateDTCMSetting(); n.ARM9->UpdatePURegions(true);
     n.ARM9->ICacheInvalidateAll();
-    n.ARM9IOWrite16(0x04000304, io9.h(0x304));
-    n.ARM7IOWrite16(0x04000304, io7.h(0x304));
+    // DeSmuME stores POWCNT in nds.power1/power2, not ARMx_REG[0x304].
+    // Enable the 2D engines before their register writes, which are ignored
+    // by melonDS when the corresponding engine is powered off.
+    const u16 power9 = (nds.number("_P00") ? 1 : 0) | (nds.number("_P01") ? 2 : 0)
+        | (nds.number("_P02") ? 4 : 0) | (nds.number("_P03") ? 8 : 0)
+        | (nds.number("_P04") ? 0x200 : 0) | (nds.number("_P05") ? 0x8000 : 0);
+    const u16 power7 = (nds.number("_P06") ? 1 : 0) | (nds.number("_P07") ? 2 : 0);
+    n.ARM9IOWrite16(0x04000304, power9);
+    n.ARM7IOWrite16(0x04000304, power7);
     for (int i = 0; i < 9; i++) {
         const u32 off = 0x240 + i + (i >= 7 ? 1 : 0);
         n.ARM9IOWrite8(0x04000000 + off, io9.b(off));
@@ -208,16 +240,19 @@ int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
     n.PostFlag9 = io9.b(0x300); n.PostFlag7 = io7.b(0x300);
     n.ARM7BIOSProt = io7.h(0x308);
     n.IPCSync9 = io9.h(0x180); n.IPCSync7 = io7.h(0x180);
-    n.IPCFIFOCnt9 = io9.h(0x184); n.IPCFIFOCnt7 = io7.h(0x184);
+    // DeSmuME persists the dynamic empty/full status bits in ARMx_REG.
+    // melonDS computes those bits from FIFO state on every read; retaining
+    // bit 8 here makes a nonempty receive FIFO appear permanently empty.
+    n.IPCFIFOCnt9 = io9.h(0x184) & 0xc404; n.IPCFIFOCnt7 = io7.h(0x184) & 0xc404;
     n.IPCFIFO9.Clear(); n.IPCFIFO7.Clear();
     for (int i = 0; i < 2; i++) {
-        auto& fifo = i ? n.IPCFIFO9 : n.IPCFIFO7; // DeSmuME stores receiving FIFOs.
+        auto& fifo = i ? n.IPCFIFO7 : n.IPCFIFO9; // Both cores store the sender's FIFO.
         const std::string prefix = i ? "F1" : "F0";
         const u32 head = mmu.number(prefix + "TH"), count = mmu.number(prefix + "SZ");
         auto bytes = mmu.get(prefix + "BF");
         if (head >= 16 || count > 16) return -20;
         // Preserve the last-word-on-empty behaviour as well as queued entries.
-        fifo.Write(bytes.w(((head + 15) & 15) * 4)); fifo.Read();
+        fifo.Write(0); fifo.Read(); // DeSmuME's empty FIFO read returns zero, not a stale ring entry.
         for (u32 j = 0; j < count; j++) fifo.Write(bytes.w(((head + j) & 15) * 4));
         n.IME[i] = mmu.get("MIME").w(i * 4); n.IE[i] = mmu.get("MIE_").w(i * 4);
         n.IF[i] = mmu.get("MIF_").w(i * 4) | mmu.get("MIFP").w(i * 4);
@@ -304,7 +339,11 @@ int ImportDeSmuMEState(NDS& n, const u8* data, size_t length) {
     for (int i = 0; i < 4; i++) n.DMA9Fill[i] = io9.w(0xe0 + 4 * i);
     // DeSmuME timestamps use the 67MHz clock, melonDS system/ARM7 use 33MHz.
     const u64 system = ticks >> 1;
-    for (u32 i = 0; i < Event_MAX; i++) if (n.SchedListMask & (1u << i)) n.SchedList[i].Timestamp += system;
+    // Inactive periodic events retain their last timestamp. In particular LCD
+    // is inactive between frames, and StartScanline schedules relative to it.
+    // Shift those anchors too; otherwise the first target jumps back to reset
+    // time and neither CPU executes until the scheduler catches up.
+    for (u32 i = 0; i < Event_MAX; i++) n.SchedList[i].Timestamp += system;
     n.SysTimestamp = system; n.ARM9Timestamp = ticks9; n.ARM7Timestamp = ticks7 >> 1;
     n.ARM9Target = ticks9; n.ARM7Target = ticks7 >> 1;
     n.TimerTimestamp[0] = ticks9 >> 1; n.TimerTimestamp[1] = ticks7 >> 1;

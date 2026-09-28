@@ -25,7 +25,7 @@ async function access(mode, call) {
 }
 function key(instanceId, slot) {
   if (!Number.isInteger(instanceId) || instanceId < 0 || instanceId > 15) throw RangeError('instanceId must be 0..15');
-  if (slot !== 'save' && (!Number.isInteger(slot) || slot < 0 || slot > 9)) throw RangeError('slot must be 0..9');
+  if (slot !== 'save' && !(typeof slot === 'string' && slot.startsWith('state:') && slot.length > 6 && slot.length <= 126) && (!Number.isInteger(slot) || slot < 0 || slot > 9)) throw RangeError('slot must be 0..9');
   return `${instanceId}:${slot}`;
 }
 export const sessionStore = Object.freeze({

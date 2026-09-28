@@ -1,0 +1,4 @@
+DeSmuME commit 535f676778dff6e2cbd57ff8468b4a9846d23933.
+Disassembler.cpp/.h and tables are GPL-2.0-or-later; original copyright notices retained.
+The two small types.h/armcpu.h adapters replace emulator-wide includes.
+Source content verified against the user-supplied read-only ZIP.

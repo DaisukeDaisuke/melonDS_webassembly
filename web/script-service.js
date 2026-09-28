@@ -412,7 +412,7 @@ export function createScriptBackend(native) {
       if (name === 'saveStateToBrowser') {
         await native.execute('saveState', args);
         const bytes = await native.execute('exportState', args);
-        const stored = await sessionStore.put({ ...args, slot: args.slot ?? 0, data: bytes,
+        const stored = await sessionStore.put({ ...args, slot: args.name !== undefined ? `state:${String(args.name).trim()}` : args.slot ?? 0, data: bytes,
           romHash: romHashes.get(args.instanceId) });
         await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
           .map(s => dispatch(s, 'stateSave', { instanceId: args.instanceId, slot: args.slot ?? 0 }, true)));
@@ -420,7 +420,7 @@ export function createScriptBackend(native) {
       }
       if (name === 'loadStateFromBrowser') {
         const slot = args.slot ?? 0;
-        const blob = requireMatchingRom(await sessionStore.getRecord({ instanceId: args.instanceId, slot }), args.instanceId);
+        const blob = requireMatchingRom(await sessionStore.getRecord({ instanceId: args.instanceId, slot: args.name !== undefined ? `state:${String(args.name).trim()}` : slot }), args.instanceId);
         const result = await native.execute('loadState', { ...args, slot, bytes: await blob.arrayBuffer() });
         await Promise.all([...scripts.values()].filter(s => s.instanceId === args.instanceId)
           .map(s => dispatch(s, 'stateLoad', { instanceId: args.instanceId, slot }, true)));

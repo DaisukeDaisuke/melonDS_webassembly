@@ -10,7 +10,7 @@ export function instanceId(value) {
 const METHODS = Object.freeze({
   createInstance: 'global', listInstances: 'global', loadRomMany: 'global',
   destroyInstance: 'instance', status: 'instance', pause: 'instance', resume: 'instance',
-  reset: 'instance', step: 'instance', stepOver: 'instance', runUntil: 'instance',
+  reset: 'instance', step: 'instance', stepOver: 'instance', smartStep: 'instance', runUntil: 'instance',
   loadRom: 'instance', loadState: 'instance', saveState: 'instance',
   exportState: 'instance', importSave: 'instance', exportSave: 'instance',
   saveStateToBrowser: 'instance', loadStateFromBrowser: 'instance',
@@ -21,7 +21,7 @@ const METHODS = Object.freeze({
   disassemble: 'instance', addBreakpoint: 'instance',
   removeBreakpoint: 'instance', listBreakpoints: 'instance', callStack: 'instance', input: 'instance',
   startInputRecording: 'instance', stopInputRecording: 'instance', getInputRecording: 'instance',
-  inputSequence: 'instance', stopInputSequence: 'instance', touch: 'instance',
+  inputSequence: 'instance', repeatInput: 'instance', stopInputSequence: 'instance', touch: 'instance',
   screenshot: 'instance', localCommLog: 'instance', wifiLog: 'instance',
   captureFrame: 'instance', compareFrames: 'instance',
   injectNetworkFrame: 'instance', setNetworkBackend: 'instance',
@@ -126,7 +126,7 @@ export function createApi(backend) {
     if (entry) entry.promise = operation;
     // Observational waiters must not hold the instance queue: gameplay input
     // and network replies need to remain executable while a waiter is pending.
-    if (!['waitFrames', 'waitMemory', 'runUntil', 'stepOver', 'step',
+    if (!['waitFrames', 'waitMemory', 'runUntil', 'stepOver', 'smartStep', 'step',
       'injectNetworkFrame', 'runScript', 'callPersistentScriptMcp'].includes(name)) {
       for (const id of ids) tails.set(id, operation);
     }

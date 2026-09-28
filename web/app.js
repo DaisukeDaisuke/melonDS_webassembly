@@ -5,6 +5,10 @@ import { loadLayout, saveLayout, makeTile, TILE_TYPES, LABELS } from './layout.j
 import { registerWebMcp } from './webmcp.js';
 import { createVirtualNetwork } from './virtual-network.js';
 import { renderFileExplorer } from './file-explorer.js';
+import { renderDebuggerTool } from './debugger-ui.js';
+import { renderStorageTool } from './storage-ui.js';
+import { createAudioBus } from './audio.js';
+import { decodePacket } from './packet-decode.js';
 
 const $ = selector => document.querySelector(selector);
 const workspace = $('#workspace');
@@ -12,9 +16,15 @@ const layout = loadLayout();
 const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], names: new Map(), logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
-const audio = { context: null, next: Array(16).fill(0) };
+const audio = createAudioBus({ onTargets: ids => backend.setAudioTargets(ids), onChange: updateAudioTargets });
+globalThis.melondsAudio = Object.freeze({ stats: () => audio.stats() });
 globalThis.melonds = api;
-globalThis.melondsVirtualNetwork = createVirtualNetwork(api);
+globalThis.melondsVirtualNetwork = createVirtualNetwork(api, { onEvent: event => {
+  if (event.type !== 'wifi-log') return;
+  state.logs['wifi-log'].push(event);
+  if (state.logs['wifi-log'].length > 2000) state.logs['wifi-log'].splice(0, state.logs['wifi-log'].length - 2000);
+  for (const tile of workspace.querySelectorAll('[data-type="wifi-log"]')) tile.querySelector('.tile-body').dispatchEvent(new Event('packet'));
+} });
 globalThis.melondsFiles = globalThis.melondsVirtualNetwork.files;
 
 function errorMessage(error) {
@@ -27,26 +37,10 @@ function updateScreenTargets() {
     .map(tile => tile.instanceId))]);
 }
 function updateAudioTargets() {
-  backend.setAudioTargets([...new Set([...workspace.querySelectorAll('[data-type=screen]')]
-    .filter(node => node._audioActive)
-    .map(node => Number(node.querySelector('.instance-select').value)))]);
+  for (const node of workspace.querySelectorAll('[data-type=screen]')) node._syncAudio?.();
 }
 function playAudio({ instanceId, samples }) {
-  if (!audio.context || !samples?.length) return;
-  const frames = samples.length / 2;
-  const buffer = audio.context.createBuffer(2, frames, 48000);
-  const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
-  for (let n = 0; n < frames; n++) {
-    left[n] = samples[n * 2] / 32768;
-    right[n] = samples[n * 2 + 1] / 32768;
-  }
-  const source = audio.context.createBufferSource();
-  source.buffer = buffer; source.connect(audio.context.destination);
-  const now = audio.context.currentTime;
-  if (audio.next[instanceId] < now || audio.next[instanceId] > now + .25) audio.next[instanceId] = now + .02;
-  source.start(audio.next[instanceId]);
-  audio.next[instanceId] += frames / 48000;
-  source.onended = () => source.disconnect();
+  audio.push({ instanceId, samples });
 }
 function apply(target, callback) {
   const button = target instanceof HTMLElement ? target : null;
@@ -60,7 +54,10 @@ function apply(target, callback) {
 function fmt(value) {
   if (value instanceof Uint8Array) return Array.from(value, b => b.toString(16).padStart(2, '0')).join(' ');
   if (typeof value === 'string') return value;
-  return JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2) ?? '—';
+  if (value === null || value === undefined) return '—';
+  if (Array.isArray(value)) return value.map((item, index) => typeof item === 'object' ? `${index + 1}. ${fmt(item)}` : String(item)).join('\n');
+  if (typeof value === 'object') return Object.entries(value).map(([key, item]) => `${key}: ${fmt(item)}`).join('\n');
+  return String(value);
 }
 function el(tag, className, text) {
   const item = document.createElement(tag);
@@ -93,7 +90,7 @@ function bytes(input) {
   return Uint8Array.from(value.match(/.{2}/g), n => Number.parseInt(n, 16));
 }
 function download(data, name, type = 'application/octet-stream') {
-  const url = URL.createObjectURL(new Blob([data], { type }));
+  const url = URL.createObjectURL(new Blob([Array.isArray(data) ? new Uint8Array(data) : data], { type }));
   const link = document.createElement('a');
   link.href = url; link.download = name; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
@@ -135,11 +132,12 @@ function renderLog(body, tile) {
     }));
     controls.append(button('ネットワーク切断', () => api.setNetworkBackend({ instanceId: tile.instanceId, backend: 'disabled' })));
   }
-  const table = el('table', 'packet-table');
+  const table = el('table', tile.type === 'wifi-log' ? 'packet-table network-log' : 'packet-table');
   const head = el('thead'); const header = el('tr');
-  for (const label of ['時刻', '方向', '送信/SenderID', '受信', '種別', '長さ', 'raw payload']) header.append(el('th', '', label));
+  for (const label of ['時刻', '方向', '送信元', '宛先', 'プロトコル', '長さ', '内容']) header.append(el('th', '', label));
   head.append(header); table.append(head); const tbody = el('tbody'); table.append(tbody); body.append(table);
   const empty = el('p', 'muted', '受信データはまだありません。'); body.append(empty);
+  const detail = el('pre', 'network-detail'); detail.hidden = true; body.append(detail);
   function update() {
     if (tile.settings.paused) return;
     tbody.replaceChildren();
@@ -150,9 +148,12 @@ function renderLog(body, tile) {
       const tr = el('tr');
       const sender = tile.type === 'wifi-log' && packet.direction === 'RX' ? 'NET' : packet.senderId ?? packet.instanceId;
       const receiver = tile.type === 'wifi-log' ? (packet.direction === 'RX' ? packet.instanceId : 'NET') : packet.destination ?? '*';
-      for (const value of [packet.timestamp, packet.direction || 'TX', sender, receiver,
-        packet.packetType || 'PACKET', packet.length ?? packet.payload?.length ?? 0,
-        fmt(packet.payload ?? packet.data ?? '')]) tr.append(el('td', '', String(value)));
+      const decoded = tile.type === 'wifi-log' ? (packet.decoded ||= decodePacket(packet)) : null;
+      const raw = packet.payload ? Array.from(packet.payload, n => n.toString(16).padStart(2, '0')).join(' ') : '';
+      for (const value of [packet.timestamp, packet.direction || 'TX', decoded?.source || sender, decoded?.destination || receiver,
+        decoded?.protocol || packet.packetType || 'PACKET', packet.length ?? packet.payload?.length ?? 0,
+        decoded?.summary || raw.slice(0, 192)]) tr.append(el('td', '', String(value)));
+      tr.onclick = () => { for (const selected of tbody.querySelectorAll('.selected')) selected.classList.remove('selected'); tr.classList.add('selected'); detail.hidden = false; detail.textContent = decoded?.detail || raw; };
       tbody.append(tr);
     }
   }
@@ -169,6 +170,8 @@ function renderLog(body, tile) {
 
 function renderBody(body, tile, tileElement) {
   const args = extra => ({ instanceId: tile.instanceId, cpu: tile.cpu, ...extra });
+  if (renderDebuggerTool(body, tile, tileElement, { api, save, onError: errorMessage, jump: jumpTo })) return;
+  if (renderStorageTool(body, tile, tileElement, { api, save, onError: errorMessage, download, audio })) return;
   if (tile.type === 'files') return renderFileExplorer(body, {
     files: globalThis.melondsFiles, tile, save, onError: errorMessage
   });
@@ -181,7 +184,7 @@ function renderBody(body, tile, tileElement) {
     top.width = bottom.width = 256; top.height = bottom.height = 192;
     top.setAttribute('aria-label', '上画面'); bottom.setAttribute('aria-label', '下画面');
     const toolbar = el('div', 'screen-toolbar');
-    toolbar.append(button('再開', () => api.resume(args())), button('停止', () => api.pause(args())));
+    toolbar.append(button('再開', () => { audio.flush(tile.instanceId); return api.resume(args()); }), button('停止', async () => { await api.pause(args()); audio.flush(tile.instanceId); }));
     const rom = el('input'); rom.type = 'file'; rom.accept = '.nds,.srl'; rom.hidden = true;
     rom.setAttribute('aria-label', `インスタンス${tile.instanceId}のROM`);
     rom.onchange = () => void apply(null, async () => {
@@ -191,20 +194,35 @@ function renderBody(body, tile, tileElement) {
       state.names.set(tile.instanceId, file.name); filename.textContent = file.name;
     }).finally(() => { rom.value = ''; });
     toolbar.append(button('ROM', () => rom.click()), rom);
+    for (const [label, accept, kind] of [['DST', '.dst,.ml', 'state'], ['SAV', '.sav,.dsv', 'save']]) {
+      const fileInput = el('input'); fileInput.type = 'file'; fileInput.accept = accept; fileInput.hidden = true;
+      fileInput.dataset.loadKind = kind; fileInput.setAttribute('aria-label', `${label}をこのエミュレーターに読み込む`);
+      fileInput.onchange = () => { const file = fileInput.files?.[0], id = tile.instanceId; if (!file) return;
+        void apply(null, async () => { audio.flush(id); if (kind === 'state') await api.loadState({ instanceId: id, file }); else { await api.importSave({ instanceId: id, file }); await api.reset({ instanceId: id }); }
+          for (const item of workspace.querySelectorAll('.tile')) item._debugListener?.({ type: 'debug-stop', instanceId: id });
+        }).finally(() => { fileInput.value = ''; });
+      };
+      toolbar.append(button(label, () => fileInput.click()), fileInput);
+    }
     const frameLabel = el('span', 'screen-state', '—'); toolbar.append(frameLabel);
+    const destroy = button('中断', async () => { const id = tile.instanceId; release(); audio.disable(id); await api.destroyInstance({ instanceId: id }); });
+    destroy.className = 'screen-destroy'; destroy.title = '実行を停止し、このエミュレーターを破棄'; toolbar.append(destroy);
     const footer = el('div', 'screen-footer');
     const filename = el('span', '', state.names.get(tile.instanceId) || 'ROM未読込');
     const toggleAudio = button('音声 OFF', async () => {
-      if (!audio.context) audio.context = new AudioContext({ sampleRate: 48000 });
-      await audio.context.resume();
-      tileElement._audioActive = !tileElement._audioActive;
-      toggleAudio.textContent = tileElement._audioActive ? '音声 ON' : '音声 OFF';
-      toggleAudio.setAttribute('aria-pressed', String(tileElement._audioActive));
-      updateAudioTargets();
+      await audio.toggle(tile.instanceId);
     });
+    tileElement._syncAudio = () => { toggleAudio.textContent = audio.has(tile.instanceId) ? '音声 ON' : '音声 OFF'; toggleAudio.setAttribute('aria-pressed', String(audio.has(tile.instanceId))); };
+    tileElement._syncAudio();
     footer.append(filename, toggleAudio);
     stack.append(top, bottom);
     body.append(toolbar, stack, footer);
+    const fit = new ResizeObserver(() => {
+      const available = Math.max(1, body.clientHeight - toolbar.offsetHeight - footer.offsetHeight - 8);
+      stack.style.width = `${Math.max(1, Math.min(body.clientWidth - 8, available * 256 / 388))}px`;
+    });
+    fit.observe(body); fit.observe(toolbar); fit.observe(footer);
+    tileElement._cleanup = () => fit.disconnect();
     const held = new Set();
     const keymap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', KeyX: 'A', KeyZ: 'B', KeyS: 'X', KeyA: 'Y', KeyQ: 'L', KeyW: 'R', Enter: 'START', ShiftLeft: 'SELECT', ShiftRight: 'SELECT' };
     stack.addEventListener('keydown', event => {
@@ -249,10 +267,13 @@ function renderBody(body, tile, tileElement) {
     };
     tileElement._frameListener = draw;
     body.addEventListener('target-change', () => {
+      tileElement._syncAudio();
       for (const canvas of [top, bottom]) canvas.getContext('2d').clearRect(0, 0, 256, 192);
       frameLabel.textContent = '—'; filename.textContent = state.names.get(tile.instanceId) || 'ROM未読込';
-      if (state.instances.includes(tile.instanceId)) void api.screenshot(args()).then(frame => draw({ ...frame, type: 'frame', instanceId: tile.instanceId })).catch(() => {});
+      const instanceId = tile.instanceId;
+      if (state.instances.includes(instanceId)) void api.screenshot({ instanceId }).then(frame => draw({ ...frame, type: 'frame', instanceId })).catch(() => {});
     });
+    queueMicrotask(() => body.dispatchEvent(new Event('target-change')));
     return;
   }
   if (tile.type === 'local-log' || tile.type === 'wifi-log') return renderLog(body, tile);
@@ -342,6 +363,14 @@ function renderBody(body, tile, tileElement) {
       item.addEventListener('blur', () => set(false));
       controls.append(item);
     }
+    const repeatControls = row(body); repeatControls.classList.add('repeat-controls');
+    const repeatKey = el('select'); repeatKey.setAttribute('aria-label', '連打するボタン');
+    for (const key of ['A', 'B', 'X', 'Y', 'L', 'R', 'START', 'SELECT', 'UP', 'DOWN', 'LEFT', 'RIGHT']) repeatKey.append(new Option(key, key));
+    repeatControls.append(repeatKey);
+    const repeatCount = textInput(repeatControls, '回数', '120'); repeatCount.type = 'number'; repeatCount.min = 1; repeatCount.max = 50000;
+    const pressFrames = textInput(repeatControls, '押下フレーム数', '2'); pressFrames.type = 'number'; pressFrames.min = 1;
+    const releaseFrames = textInput(repeatControls, '解放フレーム数', '2'); releaseFrames.type = 'number'; releaseFrames.min = 1;
+    repeatControls.append(button('連打', async () => { const target = args(); await api.repeatInput({ ...target, keys: [repeatKey.value], count: Number(repeatCount.value), pressFrames: Number(pressFrames.value), releaseFrames: Number(releaseFrames.value) }); await api.resume(target); output.textContent = `${repeatKey.value} × ${repeatCount.value} 回`; }), button('連打を停止', async () => { await api.stopInputSequence(args()); output.textContent = '連打を停止しました'; }));
   } else if (tile.type === 'state') {
     const slot = textInput(controls, 'スロット (0-9)', '0');
     act('ステート保存', () => api.saveState(args({ slot: Number(slot.value) })));
@@ -416,11 +445,11 @@ function renderTile(tile) {
   };
   const cpu = node.querySelector('.cpu-select'); cpu.value = tile.cpu;
   cpu.onchange = () => { tile.cpu = cpu.value; save(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change')); };
-  if (['screen', 'local-log', 'wifi-log', 'input', 'state', 'script', 'persistent-scripts'].includes(tile.type)) node.querySelector('.cpu-label').hidden = true;
+  if (['screen', 'local-log', 'wifi-log', 'input', 'state', 'save', 'script', 'persistent-scripts'].includes(tile.type)) node.querySelector('.cpu-label').hidden = true;
   const min = node.querySelector('.tile-minimize');
   min.onclick = () => { tile.minimized = !tile.minimized; node.classList.toggle('minimized', tile.minimized); min.setAttribute('aria-label', tile.minimized ? '展開' : '最小化'); save(); updateScreenTargets(); };
   node.classList.toggle('minimized', tile.minimized);
-  node.querySelector('.tile-close').onclick = () => { node._releaseInput?.(); node._resizeObserver?.disconnect(); layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); updateScreenTargets(); updateAudioTargets(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
+  node.querySelector('.tile-close').onclick = () => { node._releaseInput?.(); node._cleanup?.(); node._resizeObserver?.disconnect(); layout.tiles.splice(layout.tiles.indexOf(tile), 1); node.remove(); save(); updateScreenTargets(); updateAudioTargets(); refreshSummary(); $('#workspace-empty').hidden = !!layout.tiles.length; };
   node.style.zIndex = tile.z;
   if (layout.mode === 'free') place(node, tile);
   else if (tile.gridHeight) node.style.height = `${tile.gridHeight}px`;
@@ -453,7 +482,7 @@ function place(node, tile) {
   node.style.width = `${tile.width}px`; node.style.height = `${tile.height}px`;
 }
 function renderLayout() {
-  for (const node of workspace.querySelectorAll('.tile')) { node._releaseInput?.(); node._resizeObserver?.disconnect(); }
+  for (const node of workspace.querySelectorAll('.tile')) { node._releaseInput?.(); node._cleanup?.(); node._resizeObserver?.disconnect(); }
   workspace.replaceChildren();
   workspace.className = `workspace ${layout.mode}`;
   for (const tile of layout.tiles) renderTile(tile);
@@ -466,7 +495,7 @@ function renderLayout() {
 for (const type of TILE_TYPES) {
   const node = $('#palette-template').content.firstElementChild.cloneNode(true);
   node.querySelector('.palette-name').textContent = LABELS[type];
-  node.querySelector('.palette-icon').textContent = ({ screen: '▣', debugger: '⌁', memory: '▤', disassembly: '≡', registers: 'R', breakpoints: '◆', 'local-log': '↔', 'wifi-log': '◉', script: '⌘', 'persistent-scripts': '⟲', input: '＋', state: '◫', files: '▥' })[type];
+  node.querySelector('.palette-icon').textContent = ({ screen: '▣', debugger: '⌁', memory: '▤', disassembly: '≡', registers: 'R', breakpoints: '◆', callstack: '↳', save: '▱', 'local-log': '↔', 'wifi-log': '◉', script: '⌘', 'persistent-scripts': '⟲', input: '＋', state: '◫', files: '▥' })[type];
   node.onclick = () => addTile(type, 16 + layout.tiles.length * 24, 16 + layout.tiles.length * 24);
   node.ondragstart = event => { event.dataTransfer.setData('text/plain', type); event.dataTransfer.effectAllowed = 'copy'; };
   $('#palette-tools').append(node);
@@ -506,13 +535,15 @@ $('#rom-file').onchange = event => {
       const count = Number($('#instance-count').value);
       if (!Number.isInteger(count) || count < 1 || count > MAX_INSTANCES) throw Error('台数は1〜16で指定してください');
       for (let id = 0; state.instances.length < count && id < MAX_INSTANCES; id++) await ensureInstance(id);
-      await api.loadRomMany({ instanceIds: [...state.instances], file });
-      for (const id of state.instances) state.names.set(id, file.name);
+      const targets = [...state.instances].sort((a, b) => a - b).slice(0, count);
+      await api.loadRomMany({ instanceIds: targets, file });
+      for (const id of targets) { state.names.set(id, file.name); ensureScreen(id); }
     } else {
       const id = Number($('#rom-instance').value);
       await ensureInstance(id);
       await api.loadRom({ instanceId: id, file });
       state.names.set(id, file.name);
+      ensureScreen(id);
     }
     refreshSummary();
   }).finally(() => { input.value = ''; });
@@ -523,8 +554,16 @@ api.subscribe(event => {
     if (event.action === 'destroyInstance') {
       state.instances = state.instances.filter(id => id !== event.instanceId); state.names.delete(event.instanceId);
       globalThis.melondsVirtualNetwork.unregister({ instanceId: event.instanceId });
+
+      audio.disable(event.instanceId);
+      for (const node of workspace.querySelectorAll('[data-type=screen]')) {
+        const model = layout.tiles.find(t => t.id === node.dataset.id);
+        if (model?.instanceId === event.instanceId) { node._releaseInput?.(); node.querySelector('.tile-body').dispatchEvent(new Event('target-change')); }
+      }
     } else if (event.action === 'createInstance' && !state.instances.includes(event.instanceId)) state.instances.push(event.instanceId);
     if (event.romName) state.names.set(event.instanceId, event.romName);
+    if (event.action === 'loadRom' || event.action === 'loadRomMany') audio.flush(event.instanceId);
+    for (const node of workspace.querySelectorAll('.tile')) node._debugListener?.({ type: 'debug-stop', instanceId: event.instanceId });
     refreshSummary();
     return;
   }
@@ -543,6 +582,19 @@ api.subscribe(event => {
   for (const tile of workspace.querySelectorAll(`[data-type="${event.type}"]`)) tile.querySelector('.tile-body').dispatchEvent(new Event('packet'));
 });
 renderLayout();
+function ensureScreen(id) {
+  if (layout.tiles.some(t => t.type === 'screen' && t.instanceId === id)) return;
+  const tile = makeTile('screen', { instanceId: id, x: 16 + id * 24, y: 16 + id * 24 });
+  layout.tiles.push(tile); renderTile(tile); save(); updateScreenTargets(); refreshSummary();
+}
+function jumpTo({ type, instanceId, cpu, address, thumb }) {
+  let model = layout.tiles.find(t => t.type === type && t.instanceId === instanceId && t.cpu === cpu);
+  if (!model) { model = makeTile(type, { instanceId, cpu, x: 32, y: 32, width: 680, height: 460 }); layout.tiles.push(model); renderTile(model); }
+  model.minimized = false;
+  const node = [...workspace.querySelectorAll('.tile')].find(n => n.dataset.id === model.id);
+  node.classList.remove('minimized'); node.querySelector('.tile-body').dispatchEvent(new CustomEvent('address-jump', { detail: { address, thumb } }));
+  node.scrollIntoView({ block: 'nearest' }); save(); refreshSummary();
+}
   void apply(null, async () => {
     const list = await api.listInstances();
     $('#backend-status').textContent = '接続済み';
@@ -553,3 +605,4 @@ renderLayout();
   });
 void registerWebMcp(api).catch(errorMessage);
 window.addEventListener('blur', () => { for (const node of workspace.querySelectorAll('.tile')) node._releaseInput?.(); });
+document.addEventListener('melonds-state-loaded', event => { for (const node of workspace.querySelectorAll('.tile')) node._debugListener?.({ type: 'debug-stop', ...event.detail }); });

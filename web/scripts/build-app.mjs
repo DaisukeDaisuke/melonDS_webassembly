@@ -18,7 +18,7 @@ await esbuild.build({
   } }]
 });
 const html = await readFile(join(root, 'web/index.html'), 'utf8');
-const css = await readFile(join(root, 'web/style.css'), 'utf8');
+const css = await readFile(join(root, 'web/style.css'), 'utf8') + '\n' + await readFile(join(root, 'web/debugger.css'), 'utf8');
 await writeFile(join(out, 'index.html'), html.replace('<link rel="stylesheet" href="./style.css">', `<style>${css}</style>`));
 await copyFile(join(root, 'web/loader.js'), join(out, 'loader.js'));
 await copyFile(join(root, 'web/dist/melonds.wasm'), join(out, 'melonds.wasm'));

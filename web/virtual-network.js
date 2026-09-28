@@ -8,8 +8,10 @@ import { createFileStore, dlcPath } from './file-store.js';
 // A service receives raw Ethernet frames actually emitted by melonDS WifiAP.
 // Its responses are enqueued at Platform::Net_RecvPacket, never substituted
 // for a game-facing result in JavaScript.
-export function createVirtualNetwork(api) {
+export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
   const servers = new Map();
+  const pending = new Map();
+  const diagnostic = (id, protocol, summary, detail = '', direction = 'TX') => onEvent({ type: 'wifi-log', instanceId: id, direction, timestamp: new Date().toLocaleTimeString(), packetType: protocol, length: 0, decoded: { source: direction === 'TX' ? `#${id}` : 'WFC', destination: direction === 'TX' ? 'WFC' : `#${id}`, protocol, summary, detail } });
   const files = createFileStore();
   function register({ instanceId: id, onFrame }) {
     instanceId(id);
@@ -23,32 +25,46 @@ export function createVirtualNetwork(api) {
     const handler = createDq9WfcHandler({ dlc, getFile: ({ gamecd, name }) => files.get({ path: dlcPath(gamecd, name) }) });
     const lan = createLanService({ address, clientAddress, mac, domainSuffixes: ['nintendowifi.net'],
       ignoreUnknownDomains: true, interceptDns: true });
-    const onRequest = async request => httpBytes(await handler.handle(request));
+    const onRequest = async request => {
+      const protocol = request.port === 443 ? 'HTTPS' : 'HTTP';
+      const path = `${request.method} ${request.host}${request.path}`;
+      diagnostic(id, protocol, path, `${path}\n${new TextDecoder().decode(request.body?.subarray(0, 16384) || new Uint8Array())}`);
+      const bytes = httpBytes(await handler.handle(request));
+      diagnostic(id, protocol, new TextDecoder().decode(bytes.subarray(0, 128)).split('\r\n')[0], new TextDecoder().decode(bytes.subarray(0, 16384)), 'RX');
+      return bytes;
+    };
     if (!!certificatePem !== !!privateKeyPem) throw new TypeError('SSLv3 certificate and private key must be provided together');
     const createSecureSession = certificatePem
-      ? createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRequest }) : null;
-    const tcp = createTcpService({ address, mac, onRequest, createSecureSession,
+      ? createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRequest, onDiagnostic: message => diagnostic(id, 'SSLv3', message, message) }) : null;
+    const tcp = createTcpService({ address, mac, onRequest, createSecureSession, onDiagnostic: message => diagnostic(id, 'TCP', message, message),
       emitFrame: frame => api.injectNetworkFrame({ instanceId: id, data: frame }) });
     const onFrame = frame => lan(frame) || tcp(frame);
     onFrame.close = () => tcp.close();
     const unregister = register({ instanceId: id, onFrame });
+    diagnostic(id, 'WFC', certificatePem ? 'HTTP / SSLv3 サーバー接続済み' : 'HTTP サーバー接続済み', `Gateway ${address}\nClient ${clientAddress}`);
     return Object.freeze({ setDlc: (game, files) => handler.setDlc(game, files), unregister });
   }
   const unsubscribe = api.subscribe(event => {
     if (event.type !== 'wifi-log' || event.direction !== 'TX') return;
     const server = servers.get(event.instanceId);
     if (!server) return;
-    Promise.resolve().then(() => server(new Uint8Array(event.payload), {
+    const work = (pending.get(event.instanceId) || Promise.resolve()).catch(() => {}).then(() => {
+      if (servers.get(event.instanceId) !== server) return null;
+      return server(new Uint8Array(event.payload), {
       instanceId: event.instanceId, timestamp: event.timestamp
-    })).then(async reply => {
+      });
+    }).then(async reply => {
       if (reply == null) return;
+      if (servers.get(event.instanceId) !== server) return;
       for (const frame of Array.isArray(reply) ? reply : [reply]) {
         if (!(frame instanceof Uint8Array) || frame.length < 14 || frame.length > 2048) {
           throw new TypeError('Virtual server must return Ethernet Uint8Arrays (14..2048 bytes)');
         }
         await api.injectNetworkFrame({ instanceId: event.instanceId, data: frame });
       }
-    }).catch(error => console.error('Virtual network server error', error));
+    }).catch(error => { diagnostic(event.instanceId, 'ERROR', error.message || String(error)); console.error('Virtual network server error', error); });
+    pending.set(event.instanceId, work);
+    work.finally(() => { if (pending.get(event.instanceId) === work) pending.delete(event.instanceId); });
   });
   return Object.freeze({
     files,
