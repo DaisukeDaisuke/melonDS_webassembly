@@ -4,9 +4,10 @@
 const ethernet = 14;
 const macDefault = Uint8Array.from([0x02, 0x4d, 0x44, 0x53, 0x00, 0x01]);
 
-function ipv4(value) {
-  const parts = typeof value === 'string' ? value.split('.').map(Number) : value;
-  if (!Array.isArray(parts) || parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) {
+export function ipv4(value) {
+  const parts = typeof value === 'string' && /^(?:\d{1,3}\.){3}\d{1,3}$/.test(value) ? value.split('.').map(Number) : value;
+  if ((!Array.isArray(parts) && !(parts instanceof Uint8Array)) || parts.length !== 4
+    || Array.from(parts).some(n => !Number.isInteger(n) || n < 0 || n > 255)) {
     throw new TypeError('IP address must contain four octets');
   }
   return Uint8Array.from(parts);
@@ -20,13 +21,13 @@ function checksum(bytes) {
 function u16(data, offset) { return (data[offset] << 8) | data[offset + 1]; }
 function write16(data, offset, value) { data[offset] = value >>> 8; data[offset + 1] = value & 255; }
 function same(a, b) { return a.every((value, index) => value === b[index]); }
-function udpReply(frame, { sourceMac, sourceIp, targetIp, sourcePort, targetPort, payload, broadcast = false }) {
+function udpFrame({ sourceMac, sourceIp, targetMac, targetIp, sourcePort, targetPort, payload, id = 0 }) {
   const reply = new Uint8Array(ethernet + 20 + 8 + payload.length);
-  reply.set(broadcast ? new Uint8Array(6).fill(255) : frame.subarray(6, 12));
+  reply.set(targetMac);
   reply.set(sourceMac, 6); write16(reply, 12, 0x0800);
   const header = ethernet;
   reply[header] = 0x45; write16(reply, header + 2, reply.length - ethernet);
-  write16(reply, header + 4, u16(frame, ethernet + 4));
+  write16(reply, header + 4, id);
   reply[header + 8] = 64; reply[header + 9] = 17;
   reply.set(sourceIp, header + 12); reply.set(targetIp, header + 16);
   write16(reply, header + 10, checksum(reply.subarray(header, header + 20)));
@@ -34,23 +35,54 @@ function udpReply(frame, { sourceMac, sourceIp, targetIp, sourcePort, targetPort
   write16(reply, outUdp, sourcePort); write16(reply, outUdp + 2, targetPort);
   write16(reply, outUdp + 4, payload.length + 8);
   reply.set(payload, outUdp + 8);
+  const pseudo = new Uint8Array(12 + 8 + payload.length);
+  pseudo.set(sourceIp); pseudo.set(targetIp, 4); pseudo[9] = 17;
+  write16(pseudo, 10, 8 + payload.length);
+  pseudo.set(reply.subarray(outUdp), 12);
+  write16(reply, outUdp + 6, checksum(pseudo) || 0xffff);
   return reply;
+}
+const broadcastMac = new Uint8Array(6).fill(255);
+const broadcastIp = new Uint8Array(4).fill(255);
+function udpReply(frame, { broadcast = false, ...options }) {
+  return udpFrame({ ...options, targetMac: broadcast ? broadcastMac : frame.subarray(6, 12), id: u16(frame, ethernet + 4) });
+}
+
+export function portNumber(value) {
+  if (!Number.isInteger(value) || value < 1 || value > 65535) throw new RangeError('Port must be 1..65535');
+  return value;
+}
+
+function udpPayload(value) {
+  if (!(value instanceof Uint8Array) || value.length > 1472) throw new TypeError('UDP data must be a Uint8Array of at most 1472 bytes');
+  return value;
 }
 
 export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0.100', mac = macDefault,
-  domains = {}, domainSuffixes = [], ignoreUnknownDomains = false, interceptDns = false } = {}) {
+  netmask = '255.255.255.0', dhcp = true, udp = new Map(), domains = {}, domainSuffixes = [],
+  ignoreUnknownDomains = false, interceptDns = false } = {}) {
   const ip = ipv4(address);
   const clientIp = ipv4(clientAddress);
+  const mask = ipv4(netmask);
+  const subnetBroadcast = ip.map((octet, i) => octet | (255 ^ mask[i]));
   const serverMac = Uint8Array.from(mac);
   if (serverMac.length !== 6) throw new TypeError('MAC address must have six octets');
   const records = new Map(Object.entries(domains).map(([name, target]) => [name.toLowerCase().replace(/\.$/, ''), ipv4(target)]));
   const suffixes = domainSuffixes.map(name => name.toLowerCase().replace(/\.$/, ''));
 
-  return function onFrame(frame) {
+  const neighbors = new Map();
+  const remember = (address, mac) => {
+    if (!address[0] || address[0] >= 224 || same(address, ip) || (mac[0] & 1) || !mac.some(Boolean)) return;
+    if (!neighbors.has(address.join('.')) && neighbors.size >= 64) neighbors.delete(neighbors.keys().next().value);
+    neighbors.set(address.join('.'), mac.slice());
+  };
+  let nextIpId = 0;
+  function onFrame(frame) {
     if (!(frame instanceof Uint8Array) || frame.length < ethernet) return null;
     const type = u16(frame, 12);
     if (type === 0x0806 && frame.length >= 42 && u16(frame, 14) === 1 && u16(frame, 16) === 0x0800
       && frame[18] === 6 && frame[19] === 4 && u16(frame, 20) === 1 && same(frame.subarray(38, 42), ip)) {
+      if (same(frame.subarray(6, 12), frame.subarray(22, 28))) remember(frame.subarray(28, 32), frame.subarray(22, 28));
       const reply = new Uint8Array(42);
       reply.set(frame.subarray(22, 28)); reply.set(serverMac, 6); write16(reply, 12, 0x0806);
       reply.set(frame.subarray(14, 20), 14); write16(reply, 20, 2);
@@ -58,18 +90,22 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       reply.set(frame.subarray(22, 28), 32); reply.set(frame.subarray(28, 32), 38);
       return reply;
     }
-    if (type !== 0x0800 || frame.length < 42) return null;
+    if (type !== 0x0800 || frame.length < 34) return null;
     const start = ethernet;
     const ihl = (frame[start] & 15) * 4;
     const total = u16(frame, start + 2);
-    if ((frame[start] >>> 4) !== 4 || ihl < 20 || total < ihl + 8 || start + total > frame.length
-      || frame[start + 9] !== 17 || (u16(frame, start + 6) & 0x3fff) !== 0) return null;
-    const udp = start + ihl;
-    const udpLength = u16(frame, udp + 4);
+    if ((frame[start] >>> 4) !== 4 || ihl < 20 || total < ihl || start + total > frame.length
+      || (u16(frame, start + 6) & 0x3fff) !== 0) return null;
+    const sourceIp = frame.subarray(start + 12, start + 16);
+    const targetIp = frame.subarray(start + 16, start + 20);
+    remember(sourceIp, frame.subarray(6, 12));
+    if (frame[start + 9] !== 17 || total < ihl + 8) return null;
+    const offset = start + ihl;
+    const udpLength = u16(frame, offset + 4);
     if (udpLength < 8 || udpLength > total - ihl) return null;
-    const sourcePort = u16(frame, udp), targetPort = u16(frame, udp + 2);
-    if (sourcePort === 68 && targetPort === 67) {
-      const request = frame.subarray(udp + 8, udp + udpLength);
+    const sourcePort = u16(frame, offset), targetPort = u16(frame, offset + 2);
+    if (dhcp && sourcePort === 68 && targetPort === 67) {
+      const request = frame.subarray(offset + 8, offset + udpLength);
       if (request.length < 240 || request[0] !== 1 || request[1] !== 1 || request[2] !== 6
         || !same(request.subarray(236, 240), Uint8Array.from([99, 130, 83, 99]))) return null;
       let messageType = 0;
@@ -86,7 +122,7 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       const options = Uint8Array.from([
         53, 1, messageType === 1 ? 2 : 5,
         54, 4, ...ip,
-        1, 4, 255, 255, 255, 0,
+        1, 4, ...mask,
         3, 4, ...ip,
         6, 4, ...ip,
         51, 4, 0, 1, 0x51, 0x80,
@@ -96,12 +132,22 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       dhcp.set(request.subarray(0, 236)); dhcp[0] = 2;
       dhcp.set(clientIp, 16); dhcp.set(ip, 20);
       dhcp.set([99, 130, 83, 99], 236); dhcp.set(options, 240);
+      if (messageType === 3 && same(frame.subarray(6, 12), request.subarray(28, 34))) remember(clientIp, frame.subarray(6, 12));
       return udpReply(frame, { sourceMac: serverMac, sourceIp: ip,
-        targetIp: Uint8Array.from([255, 255, 255, 255]), sourcePort: 67, targetPort: 68,
+        targetIp: broadcastIp, sourcePort: 67, targetPort: 68,
         payload: dhcp, broadcast: true });
     }
+    const handler = udp.get(targetPort);
+    if (handler && (same(targetIp, ip) || same(targetIp, broadcastIp) || same(targetIp, subnetBroadcast))) {
+      const event = { data: frame.slice(offset + 8, offset + udpLength), address: sourceIp.join('.'), port: sourcePort,
+        localAddress: ip.join('.'), localPort: targetPort, destinationAddress: targetIp.join('.'), mac: frame.slice(6, 12) };
+      return Promise.resolve(handler(event)).then(data => data == null ? null : udpReply(frame, {
+        sourceMac: serverMac, sourceIp: ip, targetIp: sourceIp, sourcePort: targetPort, targetPort: sourcePort,
+        payload: udpPayload(data)
+      }));
+    }
     if (targetPort !== 53 || udpLength < 20 || (!interceptDns && !same(frame.subarray(start + 16, start + 20), ip))) return null;
-    const request = frame.subarray(udp + 8, udp + udpLength);
+    const request = frame.subarray(offset + 8, offset + udpLength);
     if (request.length < 12 || (u16(request, 2) & 0x8000) || u16(request, 4) !== 1) return null;
     let cursor = 12, position = cursor, jumped = false, steps = 0, pointers = 0, ended = false;
     const labels = [];
@@ -142,5 +188,15 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
     return udpReply(frame, { sourceMac: serverMac,
       sourceIp: interceptDns ? frame.subarray(start + 16, start + 20) : ip,
       targetIp: frame.subarray(start + 12, start + 16), sourcePort: 53, targetPort: sourcePort, payload: dns });
+  }
+  onFrame.sendUdp = ({ data, address = clientAddress, port, sourcePort = port }) => {
+    const targetIp = ipv4(address);
+    const broadcast = same(targetIp, broadcastIp) || same(targetIp, subnetBroadcast);
+    const targetMac = broadcast ? broadcastMac : neighbors.get(targetIp.join('.'));
+    if (!targetMac) throw Error('The virtual client MAC has not been learned yet');
+    return udpFrame({ sourceMac: serverMac, sourceIp: ip, targetMac,
+      targetIp, sourcePort: portNumber(sourcePort), targetPort: portNumber(port), payload: udpPayload(data), id: nextIpId++ });
   };
+  onFrame.peers = () => [...neighbors].map(([address, mac]) => ({ address, mac: mac.slice() }));
+  return onFrame;
 }

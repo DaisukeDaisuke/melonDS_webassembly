@@ -251,6 +251,22 @@ await melonds.setNetworkBackend({instanceId:0,backend:'virtual'});
 `setNetworkBackend({backend:'disabled'})`で切断。
 DLCは`melondsFiles`/DLCファイルツールのブラウザー内ファイルから配信する。
 `conntest`応答は仕様のraw HTTPレスポンスを保ち、通常HTTP整形を通さない。
+### スクリプトから仮想APを作成
+対象のDSインスタンスにファームウェアを読み込んでから呼び出す。APごとにSSID、BSSID（省略可）、チャネル、IPv4ネットワーク、UDP/TCPハンドラを指定できる。現在のコアで使用できる無線設定は `security: 'open'` と空の `key`。各インスタンスに最大7個のスクリプトAPを作成できる。
+```js
+const ap = await melondsVirtualNetwork.createAccessPoint({
+  instanceId: 0,
+  ssid: 'TestAP',
+  security: 'open',
+  key: '',
+  channel: 6,
+  network: { address: '192.168.0.200', clientAddress: '192.168.0.176', netmask: '255.255.255.0', dhcp: true },
+  udp: { 486: async ({ data, address, port }) => data },
+  tcp: { 8080: { onData: async (data, peer) => data } }
+});
+```
+`data` は UDP データグラムまたは順序どおりに届く TCP ストリームの一部分を表す `Uint8Array`。TCPでメッセージ境界が必要な場合はハンドラで蓄積する。`address` / `port` は相手、`localAddress` / `localPort` はAP側。戻り値の `Uint8Array` を応答として送り、`undefined` または `null` で応答を省略する。`network.dhcp: false` ではDS側に固定IPを設定する。DHCPが有効なとき、UDPポート67はDHCPが使う。
+`await ap.sendUdp({address: '255.255.255.255', port: 486, data})` でAPから送信できる。`address` を省略すると `clientAddress` になり、ユニキャスト送信はAPがDSのMACを学習した後に使用できる。`await ap.close()` でAPを取り除く。スクリプトAPを開いている間の `.mel` 全体保存は、任意のハンドラを復元できないためエラーになる。
 
 ## 8. 全体保存 .mel
 

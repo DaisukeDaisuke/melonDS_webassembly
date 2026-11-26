@@ -1004,6 +1004,23 @@ EMSCRIPTEN_KEEPALIVE int web_prepare_virtual_ap(int id) {
     inst->nds->Wifi.SetAccessPointSSID(selected->SSID, strnlen(selected->SSID, sizeof(selected->SSID)));
     return 0;
 }
+EMSCRIPTEN_KEEPALIVE int web_ap_configure(int id, int slot, const melonDS::u8* ssid, int length,
+                                         int channel, const melonDS::u8* bssid) {
+    auto* inst = get(id);
+    if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (!(inst->systemFiles & 4)) return -3;
+    if (!inst->nds->Wifi.ConfigureAccessPoint(slot, ssid, length, 0, nullptr, 0, channel, bssid)) return -2;
+    melonDS::Platform::WebNetClearAccessPoint(id, bssid);
+    if (!melonDS::Platform::WebNetGetEnabled(id)) melonDS::Platform::WebNetSetEnabled(id, true);
+    return 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_ap_remove(int id, int slot) {
+    auto* inst = get(id);
+    if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return inst->nds->Wifi.RemoveAccessPoint(slot) ? 0 : -2;
+}
 EMSCRIPTEN_KEEPALIVE int web_copy_frame(int id, melonDS::u8* destination, int capacity) {
     constexpr int kOneScreenBytes = 256 * 192 * 4;
     auto* inst = get(id); if (!inst || !destination || capacity < kOneScreenBytes * 2) return -1;
@@ -1042,9 +1059,9 @@ EMSCRIPTEN_KEEPALIVE int web_log_entry(int index, unsigned* meta, melonDS::u8* p
 static std::array<melonDS::Platform::WebNetFrame, 512> netLogs;
 static unsigned netLogCount;
 static unsigned netLogDropped;
-EMSCRIPTEN_KEEPALIVE int web_net_enqueue(int id, const melonDS::u8* bytes, int length) {
+EMSCRIPTEN_KEEPALIVE int web_net_enqueue(int id, const melonDS::u8* bytes, int length, const melonDS::u8* bssid) {
     if (!get(id)) return -1;
-    return melonDS::Platform::WebNetEnqueue(id, bytes, length);
+    return melonDS::Platform::WebNetEnqueue(id, bytes, length, bssid);
 }
 EMSCRIPTEN_KEEPALIVE int web_net_backend(int id, int enabled) {
     auto* inst = get(id); if (!inst || (enabled != 0 && enabled != 1)) return -1;
@@ -1068,6 +1085,7 @@ EMSCRIPTEN_KEEPALIVE int web_net_log_entry(int index, unsigned* meta, melonDS::u
     meta[2] = record.instanceId;
     meta[3] = record.received;
     meta[4] = netLogDropped;
+    std::memcpy(meta + 5, record.bssid.data(), record.bssid.size());
     memcpy(payload, record.data.data(), record.length);
     return record.length;
 }
@@ -1079,6 +1097,10 @@ void saveNDSToInstance(const u8* data, u32 length, void* userdata) {
     if (inst && data) inst->save.assign(data, data + length);
 }
 LocalMP& localMultiplayer() { return localMP; }
+const u8* networkBssid(void* userdata) {
+    auto* inst = static_cast<Instance*>(userdata);
+    return inst && inst->nds ? inst->nds->Wifi.GetBSSID() : nullptr;
+}
 void updateMultiplayerPeer(void* userdata) {
     auto* inst = static_cast<Instance*>(userdata);
     if (inst && inst->nds) localMP.SetPeer(inst->id, inst->nds->Wifi.GetMAC(), inst->nds->Wifi.GetBSSID());

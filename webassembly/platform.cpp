@@ -18,6 +18,7 @@ namespace melonDS::Platform {
 void saveNDSToInstance(const u8*, u32, void*);
 LocalMP& localMultiplayer();
 void updateMultiplayerPeer(void* userdata);
+const u8* networkBssid(void* userdata);
 static std::mutex netLock;
 static std::array<std::deque<WebNetFrame>, 16> netPending;
 static std::array<bool, 16> netEnabled = [] {
@@ -25,13 +26,14 @@ static std::array<bool, 16> netEnabled = [] {
 }();
 static std::deque<WebNetFrame> netEvents;
 static u32 netDropped = 0;
-int WebNetEnqueue(int instanceId, const u8* data, int length) {
+int WebNetEnqueue(int instanceId, const u8* data, int length, const u8* bssid) {
     if (instanceId < 0 || instanceId >= 16 || !data || length < 14 || length > 2048) return -1;
     std::lock_guard<std::mutex> lock(netLock);
     if (!netEnabled[instanceId]) return -3;
     if (netPending[instanceId].size() >= 256) return -2;
-    WebNetFrame frame {GetUSCount(), instanceId, length, true, {}};
+    WebNetFrame frame {GetUSCount(), instanceId, length, true, {}, {}};
     memcpy(frame.data.data(), data, length);
+    if (bssid) std::copy_n(bssid, 6, frame.bssid.begin());
     netPending[instanceId].push_back(frame);
     return length;
 }
@@ -39,6 +41,15 @@ void WebNetClear(int instanceId) {
     if (instanceId < 0 || instanceId >= 16) return;
     std::lock_guard<std::mutex> lock(netLock);
     netPending[instanceId].clear();
+}
+void WebNetClearAccessPoint(int instanceId, const u8* bssid) {
+    std::lock_guard<std::mutex> lock(netLock);
+    auto matches = [&](const WebNetFrame& frame) {
+        return frame.instanceId == instanceId && std::equal(frame.bssid.begin(), frame.bssid.end(), bssid);
+    };
+    auto& pending = netPending[instanceId];
+    pending.erase(std::remove_if(pending.begin(), pending.end(), matches), pending.end());
+    netEvents.erase(std::remove_if(netEvents.begin(), netEvents.end(), matches), netEvents.end());
 }
 int WebNetSetEnabled(int instanceId, bool enabled) {
     if (instanceId < 0 || instanceId >= 16) return -1;
@@ -82,6 +93,9 @@ void WebNetDoTransportState(Savestate* state) {
         if (!state->Saving) frames.resize(count);
         for (auto& frame : frames) {
             state->VarArray(&frame, sizeof(frame));
+            // Script-backed APs are not saved in workspaces. Old transport
+            // records stored unspecified padding here.
+            if (!state->Saving) frame.bssid.fill(0);
             if (frame.instanceId < 0 || frame.instanceId >= 16 || frame.length < 14 || frame.length > 2048) state->Error = true;
         }
     };
@@ -179,8 +193,9 @@ u16 MP_RecvReplies(u8* data, u64 timestamp, u16 mask, void* userdata) { return l
 int Net_SendPacket(u8* data, int len, void* userdata) {
     const int instance = id(userdata);
     if (instance < 0 || instance >= 16 || !data || len < 14 || len > 2048) return 0;
-    WebNetFrame frame {GetUSCount(), instance, len, false, {}};
+    WebNetFrame frame {GetUSCount(), instance, len, false, {}, {}};
     memcpy(frame.data.data(), data, len);
+    if (const auto* bssid = networkBssid(userdata)) std::copy_n(bssid, 6, frame.bssid.begin());
     std::lock_guard<std::mutex> lock(netLock);
     recordNet(frame);
     return 0; // melonDS platform convention: zero means submitted.
@@ -191,11 +206,15 @@ int Net_RecvPacket(u8* data, void* userdata) {
     std::lock_guard<std::mutex> lock(netLock);
     if (!netEnabled[instance]) return 0;
     auto& pending = netPending[instance];
-    if (pending.empty()) return 0;
-    WebNetFrame frame = std::move(pending.front()); pending.pop_front();
-    memcpy(data, frame.data.data(), frame.length);
-    recordNet(frame);
-    return frame.length;
+    const auto* bssid = networkBssid(userdata);
+    while (!pending.empty()) {
+        WebNetFrame frame = std::move(pending.front()); pending.pop_front();
+        if (frame.bssid != std::array<u8, 6>{} && (!bssid || !std::equal(frame.bssid.begin(), frame.bssid.end(), bssid))) continue;
+        memcpy(data, frame.data.data(), frame.length);
+        recordNet(frame);
+        return frame.length;
+    }
+    return 0;
 }
 void Camera_Start(int, void*) {}
 void Camera_Stop(int, void*) {}

@@ -194,7 +194,23 @@ function execute(name, args) {
   if (name === 'injectNetworkFrame') {
     const bytes = new Uint8Array(args.data);
     if (bytes.length < 14 || bytes.length > 2048) throw Error('Ethernet frame length must be 14..2048');
-    return withBytes(bytes, pointer => success(call('web_net_enqueue', id, pointer, bytes.length), name));
+    if (args.bssid == null) return withBytes(bytes, pointer => success(call('web_net_enqueue', id, pointer, bytes.length, 0), name));
+    const bssid = Uint8Array.from(args.bssid);
+    if (bssid.length !== 6) throw Error('BSSID must have six octets');
+    return withBytes(bssid, mac => withBytes(bytes, pointer => success(call('web_net_enqueue', id, pointer, bytes.length, mac), name)));
+  }
+  if (name === 'configureAccessPoint' || name === 'removeAccessPoint') {
+    const { slot } = args;
+    if (!Number.isInteger(slot) || slot < 1 || slot > 7) throw RangeError('Script AP slot must be 1..7');
+    if (name === 'removeAccessPoint') return success(call('web_ap_remove', id, slot), name);
+    const ssid = new TextEncoder().encode(args.ssid);
+    const bssid = Uint8Array.from(args.bssid);
+    if (!ssid.length || ssid.length > 32 || bssid.length !== 6) throw Error('Invalid SSID or BSSID');
+    return withBytes(bssid, mac => withBytes(ssid, pointer => {
+      const result = call('web_ap_configure', id, slot, pointer, ssid.length, args.channel, mac);
+      if (result === -3) throw Error('Load a DS firmware file before creating an access point');
+      return success(result, name);
+    }));
   }
   if (name === 'setNetworkBackend') {
     if (!['virtual', 'disabled'].includes(args.backend)) throw Error('backend must be virtual or disabled');
@@ -662,7 +678,7 @@ function emit(event) {
 function drainWifi() {
   const count = call('web_net_log_count');
   if (!count) return;
-  const meta = call('malloc', 20), payload = call('malloc', 2048);
+  const meta = call('malloc', 28), payload = call('malloc', 2048);
   try {
     for (let i = 0; i < count; i++) {
       const length = call('web_net_log_entry', i, meta, payload, 2048);
@@ -672,7 +688,7 @@ function drainWifi() {
       emit({ type: 'wifi-log', instanceId: view.getInt32(8, true), direction: view.getUint32(12, true) ? 'RX' : 'TX',
         timestamp: `${view.getUint32(4, true)}:${view.getUint32(0, true)}`,
         packetType: length >= 14 ? `ETH ${bytes[12].toString(16).padStart(2, '0')}${bytes[13].toString(16).padStart(2, '0')}` : 'ETH',
-        length, dropped: view.getUint32(16, true), payload: bytes });
+        length, dropped: view.getUint32(16, true), bssid: Array.from(wasm.HEAPU8.subarray(meta + 20, meta + 26)), payload: bytes });
     }
   } finally { call('free', meta); call('free', payload); }
 }
