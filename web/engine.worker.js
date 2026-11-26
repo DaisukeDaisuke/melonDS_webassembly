@@ -7,7 +7,6 @@ let wasm;
 const ids = new Set();
 const romLoaded = new Set();
 const configuredAccessPoints = new Set();
-const accessPointConfigs = Array.from({ length: 16 }, () => new Map());
 const stateWarnings = new Map();
 function stateWarning(id, warning) {
   if (warning) stateWarnings.set(id, warning); else stateWarnings.delete(id);
@@ -40,40 +39,6 @@ const success = (result, name) => {
   if (result < 0) throw Error(`${name}: native operation failed (${result})`);
   return result;
 };
-function accessPointConfig(args) {
-  const slot = args.slot;
-  if (!Number.isInteger(slot) || slot < 0 || slot >= 8) throw Error('AP slot must be 0..7');
-  const ssid = typeof args.ssid === 'string' ? new TextEncoder().encode(args.ssid) : new Uint8Array(args.ssid || []);
-  if (!ssid.length || ssid.length > 32) throw Error('SSID must be 1..32 bytes');
-  const variants = { open: 0, wep40: 1, wep104: 2 };
-  if (!Object.hasOwn(variants, args.security ?? 'open')) throw Error('Only open, wep40 and wep104 are supported by the DS Wi-Fi controller');
-  const security = args.security ?? 'open';
-  let key;
-  if (args.keyHex !== undefined) {
-    if (typeof args.keyHex !== 'string' || !/^(?:[0-9a-f]{2})*$/i.test(args.keyHex)) throw Error('Invalid WEP keyHex');
-    key = Uint8Array.from(args.keyHex.match(/../g) || [], v => Number.parseInt(v, 16));
-  } else key = typeof args.key === 'string' ? new TextEncoder().encode(args.key) : new Uint8Array(args.key || []);
-  if (key.length !== [0, 5, 13][variants[security]]) throw Error('WEP key must be exactly 5 or 13 bytes (open: empty)');
-  const channel = args.channel ?? 6;
-  if (!Number.isInteger(channel) || channel < 1 || channel > 14) throw Error('AP channel must be 1..14');
-  let bssid = args.bssid;
-  if (bssid == null) bssid = [0x02, 0xf0, 0x77, 0x77, 0x77, 0x77 + slot];
-  else if (typeof bssid === 'string') {
-    if (!/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(bssid)) throw Error('Invalid BSSID');
-    bssid = bssid.split(':').map(part => Number.parseInt(part, 16));
-  }
-  bssid = Uint8Array.from(bssid);
-  if (bssid.length !== 6 || bssid[0] & 1) throw Error('BSSID must be a unicast 6-byte MAC');
-  return { slot, ssid: Array.from(ssid), security, key: Array.from(key), channel, bssid: Array.from(bssid) };
-}
-function applyAccessPoint(id, config) {
-  const ssid = Uint8Array.from(config.ssid), key = Uint8Array.from(config.key), bssid = Uint8Array.from(config.bssid);
-  const buffer = new Uint8Array(ssid.length + key.length + bssid.length);
-  buffer.set(ssid); buffer.set(key, ssid.length); buffer.set(bssid, ssid.length + key.length);
-  return withBytes(buffer, pointer => success(call('web_ap_configure', id, config.slot,
-    pointer, ssid.length, { open: 0, wep40: 1, wep104: 2 }[config.security],
-    pointer + ssid.length, key.length, config.channel, pointer + ssid.length + key.length), 'configureAccessPoint'));
-}
 function withBytes(bytes, run) {
   const pointer = call('malloc', bytes.length || 1);
   if (!pointer) throw Error('Wasm memory exhausted');
@@ -205,9 +170,7 @@ function execute(name, args) {
         return wasm.HEAPU8.slice(pointer, pointer + length);
       });
     });
-    return { system, core, slots, mask: masks[id], freezes: [...freezes[id]], configuredAccessPoint: configuredAccessPoints.has(id),
-      accessPoints: [...accessPointConfigs[id].values()].map(value => structuredClone(value)),
-      stateWarning: stateWarnings.get(id) || null };
+    return { system, core, slots, mask: masks[id], freezes: [...freezes[id]], configuredAccessPoint: configuredAccessPoints.has(id), stateWarning: stateWarnings.get(id) || null };
   }
   if (name === 'workspaceRestore') {
     const saved = args.data;
@@ -220,12 +183,6 @@ function execute(name, args) {
     freezes[id] = new Map(saved.freezes); masks[id] = saved.mask;
     stateWarning(id, saved.stateWarning);
     if (saved.configuredAccessPoint) configuredAccessPoints.add(id); else configuredAccessPoints.delete(id);
-    accessPointConfigs[id].clear();
-    for (const record of saved.accessPoints || []) {
-      const value = accessPointConfig(record);
-      applyAccessPoint(id, value);
-      accessPointConfigs[id].set(value.slot, value);
-    }
     lastFrames.set(id, -1); paused.add(id);
     return true;
   }
@@ -234,21 +191,6 @@ function execute(name, args) {
     return history[type].filter(entry => entry.instanceId === id || entry.destination === id)
       .slice(-Math.min(Math.max(args.limit || 100, 1), 500));
   }
-  if (name === 'configureAccessPoint') {
-    const config = accessPointConfig(args);
-    applyAccessPoint(id, config);
-    accessPointConfigs[id].set(config.slot, config);
-    const { key, ...publicConfig } = config;
-    return { instanceId: id, ...publicConfig };
-  }
-  if (name === 'removeAccessPoint') {
-    const slot = args.slot;
-    if (!Number.isInteger(slot) || slot < 0 || slot >= 8) throw Error('AP slot must be 0..7');
-    success(call('web_ap_remove', id, slot), name);
-    accessPointConfigs[id].delete(slot);
-    return { instanceId: id, slot, removed: true };
-  }
-  if (name === 'listAccessPoints') return [...accessPointConfigs[id].values()].map(({ key, ...config }) => ({ ...structuredClone(config), instanceId: id }));
   if (name === 'injectNetworkFrame') {
     const bytes = new Uint8Array(args.data);
     if (bytes.length < 14 || bytes.length > 2048) throw Error('Ethernet frame length must be 14..2048');
@@ -267,7 +209,6 @@ function execute(name, args) {
     debugWaiters.get(id)?.reject(Error('Instance destroyed during debugger operation'));
     success(call('web_destroy', id), name); ids.delete(id); romLoaded.delete(id); paused.delete(id);
     configuredAccessPoints.delete(id);
-    accessPointConfigs[id].clear();
     stateWarnings.delete(id);
     freezes[id].clear(); lastFrames.delete(id); masks[id] = 0xfff;
     return { instanceId: id };
@@ -347,14 +288,12 @@ function execute(name, args) {
           stateWarning(id, differences > 0 ? { type: 'dst-bios-mismatch', cpu: 'ARM7', differences, bytes: 16384,
             hle: !!call('web_state_bios_warning', id, 1) } : null);
           if (configuredAccessPoints.has(id)) success(call('web_prepare_virtual_ap', id), name);
-          for (const config of accessPointConfigs[id].values()) applyAccessPoint(id, config);
           lastFrames.set(id, -1); masks[id] = call('web_key_mask_get', id); return result;
         });
         })();
       }
       const result = success(call('web_load_state', id, slot), name);
       if (configuredAccessPoints.has(id)) success(call('web_prepare_virtual_ap', id), name);
-      for (const config of accessPointConfigs[id].values()) applyAccessPoint(id, config);
       lastFrames.set(id, -1); masks[id] = call('web_key_mask_get', id); return result;
     }
     const size = success(call('web_state_size', id, slot), name);

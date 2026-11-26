@@ -25,7 +25,6 @@ const METHODS = Object.freeze({
   screenshot: 'instance', localCommLog: 'instance', wifiLog: 'instance',
   captureFrame: 'instance', compareFrames: 'instance',
   injectNetworkFrame: 'instance', setNetworkBackend: 'instance',
-  configureAccessPoint: 'instance', removeAccessPoint: 'instance', listAccessPoints: 'instance',
   setPacketInterceptor: 'instance', pendingPackets: 'instance', commitPacket: 'instance',
   setPacketRoutes: 'instance', injectLocalPacket: 'instance',
   runScript: 'instance', startPersistentScript: 'instance',

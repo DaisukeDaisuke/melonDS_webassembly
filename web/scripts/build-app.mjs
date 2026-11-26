@@ -39,8 +39,6 @@ for (const name of await readdir(dist)) {
 }
 await copyFile(join(root, 'LICENSE'), join(out, 'LICENSE'));
 await copyFile(join(root, 'API.md'), join(out, 'API.md'));
-// Keep standalone protocol scripts directly retrievable as plain source files.
-await cp(join(root, 'web/examples'), join(out, 'examples'), { recursive: true });
 try { await cp(join(root, 'web/dq9/certs'), join(out, 'dq9/certs'), { recursive: true }); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
 console.log('public: index.html, loader.js, main.js, web/dist contents');
