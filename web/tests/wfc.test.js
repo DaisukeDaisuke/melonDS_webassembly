@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync, publicEncrypt, constants } from 'node:
 import { createDq9WfcHandler, httpBytes } from '../dq9-wfc.js';
 import { createLanService } from '../lan-services.js';
 import { createTcpService } from '../tcp-service.js';
+import { createVirtualNetwork } from '../virtual-network.js';
 import { createSsl3Server } from '../dq9/ssl3.js';
 import { dlcPath } from '../file-store.js';
 import { uploadPath } from '../file-explorer.js';
@@ -111,6 +112,72 @@ test('TCP answers handshake and paces HTTP response by client ACK', async () => 
   assert.match(new TextDecoder().decode(replies[1].subarray(54)), /HTTP\/1.1 200 OK/);
   const fin = await tcp(packet(101 + request.length, u32(replies[1], 38) + replies[1].length - 54, 0x10));
   assert.equal(fin[0][47] & 1, 1);
+});
+
+test('scripted AP dispatches decoded UDP and TCP payloads by BSSID and port', async () => {
+  const replies = [], received = [], operations = [];
+  let emit;
+  const network = createVirtualNetwork({
+    subscribe(listener) { emit = listener; return () => {}; },
+    async configureAccessPoint(args) { operations.push(args); },
+    async removeAccessPoint(args) { operations.push(args); },
+    async injectNetworkFrame(args) { replies.push(args); }
+  });
+  try {
+    const ap = await network.createAccessPoint({ instanceId: 0, ssid: 'TestAP', channel: 9,
+      network: { address: '192.168.0.200', clientAddress: '192.168.0.176', netmask: '255.255.255.128', dhcp: false },
+      udp: { 486: async packet => { received.push(packet); return Uint8Array.of(7); } },
+      tcp: { 8080: { async onData(data, peer) { received.push({ ...peer, data }); return Uint8Array.of(8); } } } });
+    const other = await network.createAccessPoint({ instanceId: 0, ssid: 'Other' });
+    const [created, otherCreated] = operations;
+    assert.equal(created.channel, 9);
+    const wait = async () => { await network.suspend(); network.resume(); };
+    const send = (frame, bssid = created.bssid) => {
+      emit({ type: 'wifi-log', direction: 'TX', instanceId: 0, bssid, payload: frame });
+      return wait();
+    };
+    const frame = (protocol, payload) => {
+      const offset = protocol === 17 ? 42 : 54;
+      const bytes = new Uint8Array(offset + payload.length);
+      put16(bytes, 12, 0x0800); bytes[14] = 0x45; put16(bytes, 16, bytes.length - 14);
+      bytes[23] = protocol;
+      bytes.set([192, 168, 0, 176], 26); bytes.set([192, 168, 0, 200], 30);
+      put16(bytes, 34, 12345); bytes.set(payload, offset);
+      return bytes;
+    };
+    const udp = frame(17, [3, 9]);
+    put16(udp, 36, 486); put16(udp, 38, 10);
+    await send(udp, otherCreated.bssid);
+    assert.equal(replies.length, 0);
+    await send(udp);
+    assert.deepEqual(received[0], { address: '192.168.0.176', port: 12345, localAddress: '192.168.0.200',
+      localPort: 486, destinationAddress: '192.168.0.200', data: Uint8Array.of(3, 9), mac: [0, 0, 0, 0, 0, 0] });
+    assert.deepEqual(replies[0].bssid, created.bssid);
+    assert.equal(u16(replies[0].data, 34), 486);
+    assert.equal(u16(replies[0].data, 36), 12345);
+    assert.equal(replies[0].data[42], 7);
+    const tcp = (seq, ack, flags, payload = []) => {
+      const bytes = frame(6, payload);
+      put16(bytes, 36, 8080); put32(bytes, 38, seq); put32(bytes, 42, ack);
+      bytes[46] = 0x50; bytes[47] = flags; put16(bytes, 48, 8192);
+      return bytes;
+    };
+    await send(tcp(100, 0, 2));
+    const synAck = replies[1].data;
+    assert.equal(synAck[47], 0x12);
+    const ack = u32(synAck, 38) + 1;
+    await send(tcp(101, ack, 0x18, [4]));
+    assert.deepEqual(received[1], { address: '192.168.0.176', port: 12345, localAddress: '192.168.0.200',
+      localPort: 8080, data: Uint8Array.of(4) });
+    assert.equal(replies.at(-1).data[54], 8);
+    await send(tcp(101, ack, 0x18, [4]));
+    assert.equal(received.length, 2);
+    await ap.close();
+    await send(udp);
+    assert.equal(received.length, 2);
+    await other.close();
+    assert.deepEqual(operations.slice(2), [{ instanceId: 0, slot: created.slot }, { instanceId: 0, slot: otherCreated.slot }]);
+  } finally { await network.close(); }
 });
 
 for (const [suite, algorithm, macLength, padLength] of [[5, 'sha1', 20, 40], [4, 'md5', 16, 48]]) {

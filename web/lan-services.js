@@ -4,9 +4,10 @@
 const ethernet = 14;
 const macDefault = Uint8Array.from([0x02, 0x4d, 0x44, 0x53, 0x00, 0x01]);
 
-function ipv4(value) {
-  const parts = typeof value === 'string' ? value.split('.').map(Number) : value;
-  if (!Array.isArray(parts) || parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) {
+export function ipv4(value) {
+  const parts = typeof value === 'string' && /^(?:\d{1,3}\.){3}\d{1,3}$/.test(value) ? value.split('.').map(Number) : value;
+  if ((!Array.isArray(parts) && !(parts instanceof Uint8Array)) || parts.length !== 4 ||
+    Array.from(parts).some(n => !Number.isInteger(n) || n < 0 || n > 255)) {
     throw new TypeError('IP address must contain four octets');
   }
   return Uint8Array.from(parts);
@@ -22,13 +23,13 @@ function write16(data, offset, value) { data[offset] = value >>> 8; data[offset 
 function same(a, b) { return a.every((value, index) => value === b[index]); }
 const broadcastMac = new Uint8Array(6).fill(255);
 const broadcastIp = new Uint8Array(4).fill(255);
-function port(value) {
-  if (!Number.isInteger(value) || value < 1 || value > 65535) throw new RangeError('UDP port must be 1..65535');
+export function portNumber(value) {
+  if (!Number.isInteger(value) || value < 1 || value > 65535) throw new RangeError('Port must be 1..65535');
   return value;
 }
 function udpFrame({ sourceMac, targetMac, sourceIp, targetIp, sourcePort, targetPort, payload, ipId = 0 }) {
   if (!(payload instanceof Uint8Array) || payload.length > 1472) throw new RangeError('UDP payload must be a Uint8Array of 0..1472 bytes');
-  port(sourcePort); port(targetPort);
+  portNumber(sourcePort); portNumber(targetPort);
   const reply = new Uint8Array(ethernet + 20 + 8 + payload.length);
   reply.set(targetMac);
   reply.set(sourceMac, 6); write16(reply, 12, 0x0800);
@@ -55,9 +56,11 @@ function udpReply(frame, { broadcast = false, ...fields }) {
 }
 
 export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0.100', mac = macDefault,
-  domains = {}, domainSuffixes = [], ignoreUnknownDomains = false, interceptDns = false } = {}) {
+  netmask = '255.255.255.0', dhcp = true, domains = {}, domainSuffixes = [], ignoreUnknownDomains = false, interceptDns = false } = {}) {
   const ip = ipv4(address);
   const clientIp = ipv4(clientAddress);
+  const mask = ipv4(netmask);
+  const subnetBroadcast = ip.map((octet, i) => octet | (255 ^ mask[i]));
   const serverMac = Uint8Array.from(mac);
   if (serverMac.length !== 6) throw new TypeError('MAC address must have six octets');
   const records = new Map(Object.entries(domains).map(([name, target]) => [name.toLowerCase().replace(/\.$/, ''), ipv4(target)]));
@@ -103,7 +106,7 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
     const udpLength = u16(frame, udp + 4);
     if (udpLength < 8 || udpLength > total - ihl) return null;
     const sourcePort = u16(frame, udp), targetPort = u16(frame, udp + 2);
-    if (sourcePort === 68 && targetPort === 67) {
+    if (dhcp && sourcePort === 68 && targetPort === 67) {
       const request = frame.subarray(udp + 8, udp + udpLength);
       if (request.length < 240 || request[0] !== 1 || request[1] !== 1 || request[2] !== 6
         || !same(request.subarray(236, 240), Uint8Array.from([99, 130, 83, 99]))) return null;
@@ -123,7 +126,7 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       const options = Uint8Array.from([
         53, 1, messageType === 1 ? 2 : 5,
         54, 4, ...ip,
-        1, 4, 255, 255, 255, 0,
+        1, 4, ...mask,
         3, 4, ...ip,
         6, 4, ...ip,
         51, 4, 0, 1, 0x51, 0x80,
@@ -140,10 +143,10 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
     // Custom UDP applications reuse the LAN parser and packet builder.
     const listener = bindings.get(targetPort);
     const target = frame.subarray(start + 16, start + 20);
-    if (listener && (same(target, ip) || same(target, broadcastIp))) {
+    if (listener && (same(target, ip) || same(target, broadcastIp) || same(target, subnetBroadcast))) {
       const source = frame.slice(start + 12, start + 16);
       const request = Object.freeze({ address: Array.from(source).join('.'), port: sourcePort,
-        localAddress: Array.from(target).join('.'), localPort: targetPort,
+        localAddress: ip.join('.'), localPort: targetPort, destinationAddress: target.join('.'),
         mac: Array.from(frame.subarray(6, 12)), data: frame.slice(udp + 8, udp + udpLength) });
       const respond = payload => payload == null ? null : udpReply(frame, { sourceMac: serverMac, sourceIp: ip,
         targetIp: source, sourcePort: targetPort, targetPort: sourcePort, payload });
@@ -194,17 +197,17 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       targetIp: frame.subarray(start + 12, start + 16), sourcePort: 53, targetPort: sourcePort, payload: dns });
   }
   onFrame.bindUdp = (localPort, handler) => {
-    port(localPort);
-    if (localPort === 53 || localPort === 67 || localPort === 68) throw new Error('Reserved LAN service port');
+    portNumber(localPort);
+    if (dhcp && localPort === 67) throw new Error('Reserved DHCP service port');
     if (typeof handler !== 'function') throw new TypeError('UDP listener must be a function');
     if (bindings.has(localPort)) throw new Error('UDP port already bound');
     bindings.set(localPort, handler);
     return () => { if (bindings.get(localPort) === handler) bindings.delete(localPort); };
   };
   onFrame.peers = () => [...neighbors].map(([address, mac]) => ({ address, mac: Array.from(mac) }));
-  onFrame.sendUdp = ({ sourcePort, address, port: targetPort, data }) => {
+  onFrame.sendUdp = ({ address = clientAddress, port: targetPort, sourcePort = targetPort, data }) => {
     const targetIp = ipv4(address);
-    const targetMac = same(targetIp, broadcastIp) ? broadcastMac : neighbors.get(Array.from(targetIp).join('.'));
+    const targetMac = same(targetIp, broadcastIp) || same(targetIp, subnetBroadcast) ? broadcastMac : neighbors.get(targetIp.join('.'));
     if (!targetMac) throw new Error('UDP peer has not been discovered by the virtual LAN');
     return udpFrame({ sourceMac: serverMac, targetMac, sourceIp: ip, targetIp,
       sourcePort, targetPort, payload: data, ipId: nextId++ & 0xffff });

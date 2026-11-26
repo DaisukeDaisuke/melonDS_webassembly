@@ -24,7 +24,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
   }
   function peer(connection) {
     return Object.freeze({ address: Array.from(connection.clientIp).join('.'),
-      port: connection.clientPort, localPort: connection.port });
+      port: connection.clientPort, localAddress: address, localPort: connection.port });
   }
   function enqueue(connection, result) {
     if (result == null) return;
@@ -156,7 +156,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     if (header < 20 || ihl + header > total) return null;
     const port = read16(frame, offset + 2);
     const listener = listeners.get(port);
-    if (!listener && port !== 80 && (port !== 443 || !createSecureSession)) return null;
+    if (!listener && !(port === 80 && onRequest) && !(port === 443 && createSecureSession)) return null;
     const clientIp = frame.subarray(26, 30);
     const clientPort = read16(frame, offset);
     const key = `${Array.from(clientIp).join('.')}:${clientPort}:${port}`;
@@ -168,7 +168,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     }
     if (flags & 0x02) {
       const existing = connections.get(key);
-      if (existing && existing.initialClientSeq === clientSeq && existing.synReply) {
+      if (existing && !existing.accepted && existing.initialClientSeq === clientSeq && existing.synReply) {
         existing.lastSeen = Date.now();
         return existing.synReply;
       }
@@ -260,8 +260,11 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     if ((flags & 0x01) && ((clientSeq + payload.length) >>> 0) === connection.ack) {
       connection.ack = (connection.ack + 1) >>> 0;
       replies.push(packet(connection, 0x10));
-      if (connection.raw) { connection.closing = true; notifyClose(connection, 'peer-fin'); }
-      if (connection.finSent && !connection.inflight) connections.delete(key);
+      connection.peerFinished = true;
+      if (connection.raw) connection.closing = true;
+    }
+    if (connection.peerFinished && connection.finSent && !connection.inflight) {
+      notifyClose(connection, 'peer-fin'); connections.delete(key);
     }
     const outgoing = next(connection);
     if (outgoing) replies.push(outgoing);
