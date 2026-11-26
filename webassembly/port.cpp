@@ -1004,6 +1004,25 @@ EMSCRIPTEN_KEEPALIVE int web_prepare_virtual_ap(int id) {
     inst->nds->Wifi.SetAccessPointSSID(selected->SSID, strnlen(selected->SSID, sizeof(selected->SSID)));
     return 0;
 }
+
+// These are generic 802.11 AP configuration primitives, not a proprietary
+// setup-protocol shortcut. The caller must load actual DS firmware first.
+EMSCRIPTEN_KEEPALIVE int web_ap_configure(int id, int slot, const melonDS::u8* ssid, int ssidLength,
+                                          int security, const melonDS::u8* key, int keyLength,
+                                          int channel, const melonDS::u8* bssid) {
+    auto* inst = get(id);
+    if (!inst || !ssid || !bssid) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    if (!(inst->systemFiles & 4)) return -3;
+    return inst->nds->Wifi.ConfigureAccessPoint(slot, ssid, ssidLength, security,
+                                                key, keyLength, channel, bssid) ? 0 : -2;
+}
+EMSCRIPTEN_KEEPALIVE int web_ap_remove(int id, int slot) {
+    auto* inst = get(id);
+    if (!inst) return -1;
+    std::lock_guard<std::mutex> guard(inst->coreMutex);
+    return inst->nds->Wifi.RemoveAccessPoint(slot) ? 0 : -2;
+}
 EMSCRIPTEN_KEEPALIVE int web_copy_frame(int id, melonDS::u8* destination, int capacity) {
     constexpr int kOneScreenBytes = 256 * 192 * 4;
     auto* inst = get(id); if (!inst || !destination || capacity < kOneScreenBytes * 2) return -1;
