@@ -8,22 +8,25 @@ void (async function main() {
   const config = {
     instanceId: 0,
     slot: 0,
-    ssid: 'WARPSTAR-TEST',
+    // Temporary setup AP uses Nintendo's literal six-asterisk discovery SSID.
+    setupSsid: '******',
+    ssid: 'WARPSTAR-TEST',  // Final connection profile delivered inside AES-KW
     security: 'open',        // 'open', 'wep40', or 'wep104'
     key: '',                 // For WEP: 5 or 13 ASCII bytes; alternatively set keyHex
     keyHex: undefined,      // For WEP: 10 or 26 hexadecimal digits
     channel: 6,
     bssid: '02:f0:77:77:77:77',
-    serverIp: '10.0.0.1',
-    clientIp: '10.0.0.100',
+    serverIp: '192.168.0.200',
+    clientIp: '192.168.0.176',
     challengeHex: '0001020304050607',
-    greetingIntervalMs: 1200
+    greetingIntervalMs: 2500
   };
   const api = globalThis.melonds;
   const virtual = globalThis.melondsVirtualNetwork;
   if (!api || !virtual || typeof api.configureAccessPoint !== 'function') {
     throw Error('This script requires a melonDS build with generic configureAccessPoint and register APIs');
   }
+  globalThis.wirelessStartExperiment?.stop?.();
   const status = await api.status({ instanceId: config.instanceId });
   if (!status.system.firmware || !status.system.nativeBios7 || !status.system.nativeBios9) {
     throw Error('Load native BIOS7/BIOS9 and firmware.bin before running the handshake');
@@ -77,9 +80,11 @@ void (async function main() {
       sourceIP: frame.slice(26, 30), payload: frame.slice(start + 8, start + udpLength),
       sourceMac: frame.slice(6, 12) };
   }
+  let gatewaySeen = false;
   function handleLan(frame) {
     if (frame.length >= 42 && sixteen(frame, 12) === 0x0806 &&
         sixteen(frame, 20) === 1 && equals(frame.subarray(38, 42), serverIp)) {
+      gatewaySeen = true;
       const response = new Uint8Array(42);
       response.set(frame.subarray(22, 28), 0);
       response.set(serverMac, 6); write16(response, 12, 0x0806);
@@ -164,11 +169,14 @@ void (async function main() {
   const hello = packet(1, attributes([
     tlv(1, be16(1)), tlv(2, be16(1)), tlv(5, be16(1))
   ]));
+  let handshakeStarted = false;
+  let finalized = false;
   async function handleProtocol(data) {
     const request = decodePacket(data);
     if (!request) return null;
     console.info('[DS Wi-Fi handshake] incoming message', request.type, request.body.length);
     if (request.type === 2) {
+      handshakeStarted = true;
       return packet(3, attributes([tlv(0x101, challenge)]));
     }
     if (request.type === 4) {
@@ -191,13 +199,21 @@ void (async function main() {
     }
     if (request.type === 6) {
       console.info('[DS Wi-Fi handshake] final acknowledgement', Array.from(request.body));
+      if (!finalized) {
+        finalized = true;
+        // Reconfigure the *same* AP after the DS has accepted the profile.
+        setTimeout(() => void api.configureAccessPoint({
+          instanceId: config.instanceId, slot: config.slot, ssid: config.ssid,
+          security: config.security, key: config.key, keyHex: config.keyHex,
+          channel: config.channel, bssid: config.bssid
+        }).catch(error => console.error('[DS Wi-Fi handshake] final AP:', error)), 700);
+      }
     }
     return null;
   }
   await api.configureAccessPoint({
-    instanceId: config.instanceId, slot: config.slot, ssid: config.ssid,
-    security: config.security, key: config.key, keyHex: config.keyHex,
-    channel: config.channel, bssid: config.bssid
+    instanceId: config.instanceId, slot: config.slot, ssid: config.setupSsid,
+    security: 'open', key: '', channel: config.channel, bssid: config.bssid
   });
   await api.setNetworkBackend({ instanceId: config.instanceId, backend: 'virtual' });
   let udpCount = 0, tcpCount = 0;
@@ -219,19 +235,29 @@ void (async function main() {
       return reply && udpFrame(udp.sourceMac, serverIp, udp.sourceIP, 486, udp.sourcePort, reply);
     }
   });
-  let stopped = false;
-  const timer = setInterval(() => {
-    if (stopped) return;
-    void api.injectNetworkFrame({ instanceId: config.instanceId,
-      data: udpFrame(broadcastMac, serverIp, broadcastIp, 486, 486, hello) })
-      .catch(error => console.error('[DS Wi-Fi handshake] greeting:', error));
+  let stopped = false, sending = false, greetings = 0;
+  const initialFrame = status.frames;
+  const timer = setInterval(async () => {
+    if (stopped || sending || handshakeStarted || greetings >= 18) return;
+    sending = true;
+    try {
+      const current = await api.status({ instanceId: config.instanceId });
+      // Never enqueue packets while the DS is paused. Wait for an association
+      // opportunity, and bound pre-association queued frames to avoid overflow.
+      // The DS must first resolve the emulated setup gateway over real ARP.
+      // No speculative UDP is enqueued while the Wi-Fi adapter is unassociated.
+      if (current.paused || !gatewaySeen || current.frames < initialFrame + 90) return;
+      greetings++;
+      await api.injectNetworkFrame({ instanceId: config.instanceId,
+        data: udpFrame(broadcastMac, serverIp, broadcastIp, 486, 486, hello) });
+    } catch (error) { console.error('[DS Wi-Fi handshake] greeting:', error); }
+    finally { sending = false; }
   }, config.greetingIntervalMs);
-  globalThis.wirelessStartExperiment?.stop?.();
   globalThis.wirelessStartExperiment = Object.freeze({
     config: { ...config },
     stop() { stopped = true; clearInterval(timer); unregister(); },
     sendGreeting() { return api.injectNetworkFrame({ instanceId: config.instanceId,
       data: udpFrame(broadcastMac, serverIp, broadcastIp, 486, 486, hello) }); }
   });
-  console.info('[DS Wi-Fi handshake] AP and UDP server active', config.ssid, config.security);
+  console.info('[DS Wi-Fi handshake] temporary setup AP active', config.setupSsid, 'final:', config.ssid, config.security);
 })().catch(error => console.error('[DS Wi-Fi handshake]', error));
