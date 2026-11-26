@@ -22,6 +22,37 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
     if (suspended) onFrame.suspend?.();
     return () => { if (servers.get(id) === onFrame) { servers.delete(id); onFrame.close?.(); } };
   }
+  // Register an ordinary virtual LAN. Protocol scripts only work with datagrams
+  // and streams; the existing LAN and TCP engines own every Ethernet frame.
+  function registerNetwork({ instanceId: id, address = '10.0.0.1', clientAddress = '10.0.0.100',
+    mac = [0x02, 0x4d, 0x44, 0x53, 0, 1], ...options } = {}) {
+    const lan = createLanService({ ...options, address, clientAddress, mac });
+    const emitFrame = data => api.injectNetworkFrame({ instanceId: id, data });
+    const tcp = createTcpService({ address, mac, onRequest: options.onRequest,
+      createSecureSession: options.createSecureSession, emitFrame,
+      onDiagnostic: message => diagnostic(id, 'TCP', message, message) });
+    let closed = false;
+    const onFrame = frame => lan(frame) || tcp(frame);
+    onFrame.close = () => { closed = true; lan.close(); tcp.close(); };
+    onFrame.suspend = () => tcp.suspend();
+    onFrame.resume = () => tcp.resume();
+    onFrame.settle = () => tcp.settle();
+    const unregister = register({ instanceId: id, onFrame });
+    function active() {
+      if (closed) throw Error('Virtual network is closed');
+    }
+    return Object.freeze({
+      udp: Object.freeze({
+        bind(port, handler) { active(); return lan.bindUdp(port, handler); },
+        async send(datagram) { active(); if (suspended) throw Error('Virtual network is suspended'); return emitFrame(lan.sendUdp(datagram)); }
+      }),
+      tcp: Object.freeze({
+        listen(port, handlers) { active(); return tcp.listen(port, handlers); }
+      }),
+      peers() { active(); return lan.peers(); },
+      close: unregister
+    });
+  }
   function registerDq9Wfc({ instanceId: id, address = '10.0.0.1', clientAddress = '10.0.0.100',
     mac = [0x02, 0x4d, 0x44, 0x53, 0, 1], dlc = {}, certificatePem, privateKeyPem, chainPem } = {}) {
     const handler = createDq9WfcHandler({ dlc, getFile: ({ gamecd, name }) => files.get({ path: dlcPath(gamecd, name) }) });
@@ -78,6 +109,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
   return Object.freeze({
     files,
     register,
+    registerNetwork,
     registerLan({ instanceId: id, ...options }) {
       const onFrame = createLanService(options);
       onFrame.snapshot = () => ({ type: 'lan', options: { ...options, instanceId: id } });

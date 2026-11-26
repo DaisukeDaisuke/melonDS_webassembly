@@ -18,6 +18,24 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
   const serverIp = ip(address);
   const serverMac = Uint8Array.from(mac);
   const connections = new Map();
+  const listeners = new Map();
+  function notifyClose(connection, reason) {
+    if (connection.raw) listeners.get(connection.port)?.onClose?.(peer(connection), reason);
+  }
+  function peer(connection) {
+    return Object.freeze({ address: Array.from(connection.clientIp).join('.'),
+      port: connection.clientPort, localPort: connection.port });
+  }
+  function enqueue(connection, result) {
+    if (result == null) return;
+    const data = result instanceof Uint8Array ? result : result.data;
+    if (data != null) {
+      if (!(data instanceof Uint8Array)) throw new TypeError('TCP response must contain Uint8Array data');
+      if (data.length > 5 * 1024 * 1024) throw new RangeError('TCP response exceeds 5 MiB');
+      if (data.length) connection.queue.push(data.slice());
+    }
+    if (result.close === true) connection.closing = true;
+  }
   let retransmitTimer;
   let frozenAt = null;
   const emissions = new Set();
@@ -27,6 +45,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     for (const [key, connection] of connections) {
       if (now - connection.lastSeen > 120000 || connection.inflight?.retries >= 8) {
         onDiagnostic(`Connection timeout ${key}`);
+        notifyClose(connection, 'timeout');
         connections.delete(key);
         continue;
       }
@@ -136,12 +155,17 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     const offset = 14 + ihl, header = (frame[offset + 12] >>> 4) * 4;
     if (header < 20 || ihl + header > total) return null;
     const port = read16(frame, offset + 2);
-    if (port !== 80 && (port !== 443 || !createSecureSession)) return null;
+    const listener = listeners.get(port);
+    if (!listener && port !== 80 && (port !== 443 || !createSecureSession)) return null;
     const clientIp = frame.subarray(26, 30);
     const clientPort = read16(frame, offset);
     const key = `${Array.from(clientIp).join('.')}:${clientPort}:${port}`;
     const flags = frame[offset + 13], clientSeq = read32(frame, offset + 4);
-    if (flags & 0x04) { connections.delete(key); return null; }
+    if (flags & 0x04) {
+      const connection = connections.get(key);
+      if (connection) notifyClose(connection, 'reset');
+      connections.delete(key); return null;
+    }
     if (flags & 0x02) {
       const existing = connections.get(key);
       if (existing && existing.initialClientSeq === clientSeq && existing.synReply) {
@@ -164,7 +188,8 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
         ack: (clientSeq + 1) >>> 0, seq: (Math.random() * 0xffffffff) >>> 0,
         ipId: 1, inflight: null, request: new Uint8Array(), output: null, queue: [],
         closing: false, position: 0, finSent: false,
-        secure: port === 443 ? createSecureSession() : null };
+        raw: !!listener, accepted: false,
+        secure: !listener && port === 443 ? createSecureSession() : null };
       connections.set(key, connection);
       if (emitFrame && !retransmitTimer) retransmitTimer = setInterval(tick, 250);
       const reply = packet(connection, 0x12);
@@ -179,21 +204,39 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     connection.window = read16(frame, offset + 14);
     connection.lastSeen = Date.now();
     const acknowledged = read32(frame, offset + 8);
-    if (connection.inflight && acknowledged === connection.inflight.end) connection.inflight = null;
+    if ((flags & 0x10) && connection.inflight && acknowledged === connection.inflight.end) connection.inflight = null;
     const payload = frame.subarray(offset + header, 14 + total);
     const replies = [];
-    if (payload.length && clientSeq === connection.ack) {
-      if (!connection.secure && connection.request.length + payload.length > 5 * 1024 * 1024 + 32768) {
+    if (connection.raw && !connection.accepted) {
+      if (!(flags & 0x10) || acknowledged !== connection.seq || clientSeq !== connection.ack) return null;
+      connection.accepted = true;
+      try { enqueue(connection, await listener?.onConnect?.(peer(connection))); }
+      catch (error) {
+        onDiagnostic(`TCP ${key}: ${error.message || error}`);
         connections.delete(key); return packet(connection, 0x14);
       }
-      if (!connection.secure) {
+    }
+    if (payload.length && clientSeq === connection.ack) {
+      if (!connection.raw && !connection.secure && connection.request.length + payload.length > 5 * 1024 * 1024 + 32768) {
+        connections.delete(key); return packet(connection, 0x14);
+      }
+      if (!connection.raw && !connection.secure) {
         const received = new Uint8Array(connection.request.length + payload.length);
         received.set(connection.request); received.set(payload, connection.request.length);
         connection.request = received;
       }
       connection.ack = (connection.ack + payload.length) >>> 0;
       replies.push(packet(connection, 0x10));
-      if (connection.secure) {
+      if (connection.raw) {
+        try {
+          if (!listener) throw Error('TCP listener closed');
+          enqueue(connection, await listener.onData(payload.slice(), peer(connection)));
+        } catch (error) {
+          onDiagnostic(`TCP ${key}: ${error.message || error}`);
+          notifyClose(connection, 'error');
+          connections.delete(key); return packet(connection, 0x14);
+        }
+      } else if (connection.secure) {
         try {
           const { bytes, close } = await connection.secure.receive(payload);
           if (bytes.length) connection.queue.push(bytes);
@@ -217,13 +260,29 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
     if ((flags & 0x01) && ((clientSeq + payload.length) >>> 0) === connection.ack) {
       connection.ack = (connection.ack + 1) >>> 0;
       replies.push(packet(connection, 0x10));
+      if (connection.raw) { connection.closing = true; notifyClose(connection, 'peer-fin'); }
       if (connection.finSent && !connection.inflight) connections.delete(key);
     }
     const outgoing = next(connection);
     if (outgoing) replies.push(outgoing);
     return replies.length === 0 ? null : replies;
   }
-  onFrame.close = () => { connections.clear(); clearInterval(retransmitTimer); retransmitTimer = null; };
+  onFrame.listen = (port, handlers) => {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError('TCP port must be 1..65535');
+    if (!handlers || typeof handlers.onData !== 'function') throw new TypeError('TCP onData callback required');
+    if (listeners.has(port) || (port === 80 && onRequest) || (port === 443 && createSecureSession)) throw Error('TCP port already bound');
+    listeners.set(port, handlers);
+    return () => { if (listeners.get(port) === handlers) {
+      for (const [key, connection] of connections) if (connection.raw && connection.port === port) {
+        notifyClose(connection, 'listener-closed'); connections.delete(key);
+      }
+      listeners.delete(port);
+    } };
+  };
+  onFrame.close = () => {
+    for (const connection of connections.values()) notifyClose(connection, 'closed');
+    connections.clear(); listeners.clear(); clearInterval(retransmitTimer); retransmitTimer = null;
+  };
   onFrame.suspend = () => { if (frozenAt === null) frozenAt = Date.now(); };
   onFrame.settle = () => Promise.all([...emissions]);
   onFrame.resume = () => {
@@ -237,6 +296,7 @@ export function createTcpService({ address, mac, onRequest, createSecureSession,
   };
   onFrame.snapshot = () => {
     const now = frozenAt ?? Date.now();
+    if ([...connections.values()].some(connection => connection.raw)) throw Error('Custom TCP connections cannot be snapshotted');
     return [...connections].map(([key, connection]) => {
       const { secure, lastSeen, inflight, ...fields } = connection;
       return { key, ...structuredClone(fields), age: now - lastSeen,
