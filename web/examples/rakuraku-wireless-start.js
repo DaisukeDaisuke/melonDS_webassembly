@@ -70,19 +70,23 @@ void (async () => {
   }
   function bootstrapKey(clientMac, bssid) {
     const apMac = Uint8Array.from(bssid.split(':'), part => parseInt(part, 16));
-    // The setup library clears the locally administered bit before sorting.
+    // Clear the AP's locally administered bit, then put the larger MAC first.
     apMac[0] &= 0xfd;
     const order = clientMac.findIndex((octet, i) => octet !== apMac[i]);
-    const macs = order >= 0 && clientMac[order] > apMac[order] ? [apMac, clientMac] : [clientMac, apMac];
+    const macs = order >= 0 && clientMac[order] > apMac[order] ? [clientMac, apMac] : [apMac, clientMac];
     return concat(...macs, encoder.encode('WARP'));
   }
   const one = Uint8Array.of(0, 1);
+  const setupPort = 58881; // 0xe601 on the wire in the DS setup library.
   const hello = message(1, attributes([1, one], [2, one], [5, one]));
-  const profile = attributes([0x201, encoder.encode(config.ssid)], [0x202, Uint8Array.of(0, 0)]);
+  // The DS setup UI expects key slot 1. Empty keys leave the profile open.
+  const empty = new Uint8Array();
+  const profile = attributes([0x201, encoder.encode(config.ssid)], [0x202, one], [0x205, one],
+    [0x206, empty], [0x207, empty], [0x208, empty], [0x209, empty]);
   const sessions = new Map();
   let setup, final, timer, sending = false, greetings = 0, accepted = false;
   async function onSetupPacket({ data, address, port, mac }) {
-    if (port !== 486 || data.length < 8 || u16(data, 2) !== data.length - 8 ||
+    if (port !== setupPort || data.length < 8 || u16(data, 2) !== data.length - 8 ||
         sum(data.subarray(0, data.length - 2)) !== u16(data, data.length - 2)) return;
     const type = u16(data, 0), body = data.slice(6, -2);
     const peer = `${address}/${mac.join(':')}`;
@@ -115,7 +119,7 @@ void (async () => {
   final = await virtual.createAccessPoint({ ...radio, ssid: config.ssid, security: config.security, key: config.key, network: config.network });
   try {
     setup = await virtual.createAccessPoint({ ...radio, ssid: config.setupSsid, security: 'open',
-      network: { ...config.network, dhcp: false }, udp: { 486: onSetupPacket } });
+      network: { ...config.network, dhcp: false }, udp: { [setupPort]: onSetupPacket } });
   } catch (error) { await final.close(); throw error; }
   timer = setInterval(async () => {
     if (sending || accepted || sessions.size || greetings >= 18) return;
@@ -123,7 +127,7 @@ void (async () => {
     if (!peer) return;
     sending = true;
     try {
-      await setup.sendUdp({ address: peer.address, port: 486, data: hello });
+      await setup.sendUdp({ address: peer.address, port: setupPort, data: hello });
       if (++greetings === 18) clearInterval(timer);
     } catch (error) { console.error('Wireless setup greeting', error); }
     finally { sending = false; }
