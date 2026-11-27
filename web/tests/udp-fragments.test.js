@@ -81,7 +81,7 @@ test('experiment-only tiny IPv4 fragments preserve offsets and reassemble UDP', 
     } finally { lan.close(); }
   }
   assert.throws(() => createLanService({ fragmentBytes: 10 }), /multiple of 8/);
-  assert.throws(() => createLanService({ fragmentBytes: 1488 }), /multiple of 8/);
+  assert.throws(() => createLanService({ fragmentBytes: 1984 }), /multiple of 8/);
 });
 
 test('experimental jumbo IPv4 MTU sends a 1888-byte UDP segment in one frame', () => {
