@@ -20,6 +20,9 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+env:
+  EMSCRIPTEN_VERSION: '7.0.1'
+
 jobs:
   build:
     runs-on: ubuntu-26.04
@@ -43,13 +46,19 @@ jobs:
         uses: actions/cache@v6
         with:
           path: web/dist/
-          key: melonds-wasm-v2-${{ runner.os }}-${{ steps.melonds-revision.outputs.sha }}-${{ hashFiles('webassembly/**') }}
+          key: melonds-wasm-emsdk-${{ env.EMSCRIPTEN_VERSION }}-v3-${{ runner.os }}-${{ steps.melonds-revision.outputs.sha }}-${{ hashFiles('webassembly/**') }}
 
-      - name: Install Emscripten
+      - name: Install pinned Emscripten SDK
+        if: steps.melonds-cache.outputs.cache-hit != 'true'
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+
+      - name: Print Emscripten compiler version
         if: steps.melonds-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y emscripten
+          emcc --version
+          em++ --version
 
       - name: Build melonDS WebAssembly
         if: steps.melonds-cache.outputs.cache-hit != 'true'

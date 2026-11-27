@@ -26,7 +26,17 @@ export function renderDebuggerTool(body, tile, node, { api, save, onError, jump 
   const controls = E('div', 'control-row'), status = E('div', 'debug-status', 'ROM未読込'), view = E('div', 'debug-view');
   body.append(controls, status, view);
   const args = extra => ({ instanceId: tile.instanceId, cpu: tile.cpu, ...extra });
-  let revision = 0, closed = false, refreshing = false, repeat = false, timer;
+  const AUTO_REFRESH_INTERVAL_MS = 700;
+  let revision = 0, closed = false, refreshing = false, repeat = false, refreshTimer;
+  let lastRefreshAt = 0;
+  function scheduleRefresh() {
+    if (closed || refreshTimer !== undefined) return;
+    const delay = Math.max(0, AUTO_REFRESH_INTERVAL_MS - (performance.now() - lastRefreshAt));
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined;
+      if (!closed) void refresh();
+    }, delay);
+  }
   let displayAddress = tile.settings.address ?? null, previous = new Map(), selectedLane = null;
   function report(error) { status.textContent = error?.message || String(error); status.dataset.error = 'true'; onError(error); }
   const action = (label, run, title = label) => {
@@ -93,6 +103,9 @@ export function renderDebuggerTool(body, tile, node, { api, save, onError, jump 
   async function refresh() {
     if (closed) return;
     if (refreshing) { repeat = true; return; }
+    clearTimeout(refreshTimer);
+    refreshTimer = undefined;
+    lastRefreshAt = performance.now();
     refreshing = true;
     const version = revision, target = args();
     try {
@@ -177,10 +190,10 @@ export function renderDebuggerTool(body, tile, node, { api, save, onError, jump 
         status.textContent = `${current.paused ? '停止中' : '実行中'} · ${target.cpu} ${thumb ? 'Thumb' : 'ARM'} · PC ${H(regs.r15)} · ${modes[regs.cpsr & 31] || '?'} ${flags}`;
       }
     } catch (error) { if (version === revision && !closed) { status.textContent = error?.message || String(error); status.dataset.error = 'true'; } }
-    finally { refreshing = false; if (repeat && !closed) { repeat = false; queueMicrotask(refresh); } }
+    finally { refreshing = false; if (repeat && !closed) { repeat = false; scheduleRefresh(); } }
   }
-  node._debugListener = event => { if (event.instanceId === tile.instanceId) { if (tile.type === 'debugger' || tile.type === 'disassembly') tile.settings.followPc = true; void refresh(); } };
-  body.addEventListener('target-change', () => { revision++; previous.clear(); selectedLane = null; void refresh(); });
+  node._debugListener = event => { if (event.instanceId === tile.instanceId) { if (tile.type === 'debugger' || tile.type === 'disassembly') tile.settings.followPc = true; scheduleRefresh(); } };
+  body.addEventListener('target-change', () => { revision++; previous.clear(); selectedLane = null; scheduleRefresh(); });
   body.addEventListener('address-jump', event => { if (event.detail.thumb !== undefined && mode) mode.value = event.detail.thumb ? 'thumb' : 'arm'; navigate(event.detail.address); });
   // Watch the tile's outer dimensions, not the rendered table's scroll area.
   // Replacing rows can change view geometry; it must not trigger another RPC.
@@ -196,11 +209,10 @@ export function renderDebuggerTool(body, tile, node, { api, save, onError, jump 
     // The initial observation is not a resize; the initial refresh is queued below.
     if (observedTileSize === null) { observedTileSize = size; return; }
     observedTileSize = size;
-    clearTimeout(timer);
-    timer = setTimeout(() => { if (!closed) void refresh(); }, 120);
+    scheduleRefresh();
   });
   resize.observe(node, { box: 'border-box' });
-  node._cleanup = () => { closed = true; revision++; clearTimeout(timer); resize.disconnect(); };
+  node._cleanup = () => { closed = true; revision++; clearTimeout(refreshTimer); resize.disconnect(); };
   queueMicrotask(refresh);
   return true;
 }

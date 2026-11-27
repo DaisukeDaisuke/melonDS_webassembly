@@ -588,9 +588,19 @@ function renderBody(body, tile, tileElement) {
     act('固定解除', () => api.removeMemoryFreeze(args({ address: hex(address) })));
     act('値を待つ', () => api.waitMemory(args({ address: hex(address), pattern: bytes(content) })));
   } else if (tile.type === 'registers') {
-    let refreshing = false, closed = false;
+    const REGISTER_REFRESH_INTERVAL_MS = 700;
+    let refreshing = false, closed = false, registerTimer;
+    const scheduleRegisters = () => {
+      if (closed || registerTimer !== undefined) return;
+      registerTimer = setTimeout(() => {
+        registerTimer = undefined;
+        void showRegisters().catch(() => {});
+      }, REGISTER_REFRESH_INTERVAL_MS);
+    };
     const showRegisters = async () => {
       if (refreshing || closed) return;
+      clearTimeout(registerTimer);
+      registerTimer = undefined;
       refreshing = true;
       try {
       const target = args(), current = await api.status(target);
@@ -614,13 +624,12 @@ function renderBody(body, tile, tileElement) {
         item.append(el('span', '', name.toUpperCase()), field);
         output.append(item);
       }
-      } finally { refreshing = false; }
+      } finally { refreshing = false; scheduleRegisters(); }
     };
     controls.append(button('更新', showRegisters));
-    tileElement._debugListener = event => { if (event.instanceId === tile.instanceId) void showRegisters().catch(errorMessage); };
-    const timer = setInterval(() => void showRegisters().catch(() => {}), 300);
-    tileElement._cleanup = () => { closed = true; clearInterval(timer); };
-    body.addEventListener('target-change', () => void showRegisters().catch(errorMessage));
+    tileElement._debugListener = event => { if (event.instanceId === tile.instanceId) scheduleRegisters(); };
+    tileElement._cleanup = () => { closed = true; clearTimeout(registerTimer); };
+    body.addEventListener('target-change', scheduleRegisters);
     void showRegisters().catch(errorMessage);
   } else if (tile.type === 'disassembly') {
     const address = textInput(controls, '開始アドレス (hex)', '02000000');
