@@ -61,3 +61,25 @@ test('full emulator RX queue retries every fragment in the original order', asyn
       delivered.map((_, i) => i * 1480));
   } finally { await network.close(); }
 });
+
+test('experiment-only tiny IPv4 fragments preserve offsets and reassemble UDP', () => {
+  for (const fragmentBytes of [8, 16, 48, 1480]) {
+    const lan = createLanService({ address: '10.0.0.1', dhcp: false, fragmentBytes });
+    const received = [];
+    lan.bindUdp(7788, msg => { received.push(msg.data); return null; });
+    try {
+      const original = Uint8Array.from({ length: 96 }, (_, i) => (i * 23) & 255);
+      const outgoing = lan.sendUdp({ address: '255.255.255.255', port: 7788, sourcePort: 7788, data: original });
+      const frames = Array.isArray(outgoing) ? outgoing : [outgoing];
+      assert.equal(frames.length, Math.ceil((original.length + 8) / fragmentBytes));
+      assert.deepEqual(frames.map(f => ((read16(f, 20) & 0x1fff) * 8)),
+        frames.map((_, i) => i * fragmentBytes));
+      assert.ok(frames.every(f => f.length <= 34 + fragmentBytes));
+      for (const f of frames) assert.equal(checksum(f.subarray(14, 34)), 0);
+      for (const f of frames) lan(f);
+      assert.deepEqual(received, [original]);
+    } finally { lan.close(); }
+  }
+  assert.throws(() => createLanService({ fragmentBytes: 10 }), /multiple of 8/);
+  assert.throws(() => createLanService({ fragmentBytes: 1488 }), /multiple of 8/);
+});

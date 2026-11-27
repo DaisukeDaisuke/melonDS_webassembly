@@ -27,9 +27,12 @@ export function portNumber(value) {
   if (!Number.isInteger(value) || value < 1 || value > 65535) throw new RangeError('Port must be 1..65535');
   return value;
 }
-function udpFrame({ sourceMac, targetMac, sourceIp, targetIp, sourcePort, targetPort, payload, ipId = 0 }) {
+function udpFrame({ sourceMac, targetMac, sourceIp, targetIp, sourcePort, targetPort, payload, ipId = 0, fragmentBytes = 1480 }) {
   if (!(payload instanceof Uint8Array) || payload.length > 65507) throw new RangeError('UDP payload must be a Uint8Array of 0..65507 bytes');
   portNumber(sourcePort); portNumber(targetPort);
+  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1480 || fragmentBytes % 8) {
+    throw new RangeError('UDP fragmentBytes must be a multiple of 8 from 8 to 1480');
+  }
   const udp = new Uint8Array(8 + payload.length);
   write16(udp, 0, sourcePort); write16(udp, 2, targetPort);
   write16(udp, 4, udp.length); udp.set(payload, 8);
@@ -38,8 +41,8 @@ function udpFrame({ sourceMac, targetMac, sourceIp, targetIp, sourcePort, target
   write16(pseudo, 10, udp.length); pseudo.set(udp, 12);
   write16(udp, 6, checksum(pseudo) || 0xffff);
   const frames = [];
-  for (let offset = 0; offset < udp.length; offset += 1480) {
-    const part = udp.subarray(offset, Math.min(offset + 1480, udp.length));
+  for (let offset = 0; offset < udp.length; offset += fragmentBytes) {
+    const part = udp.subarray(offset, Math.min(offset + fragmentBytes, udp.length));
     const more = offset + part.length < udp.length;
     const reply = new Uint8Array(ethernet + 20 + part.length);
     reply.set(targetMac); reply.set(sourceMac, 6); write16(reply, 12, 0x0800);
@@ -61,7 +64,10 @@ function udpReply(frame, { broadcast = false, ...fields }) {
 }
 
 export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0.100', mac = macDefault,
-  netmask = '255.255.255.0', dhcp = true, domains = {}, domainSuffixes = [], ignoreUnknownDomains = false, interceptDns = false } = {}) {
+  netmask = '255.255.255.0', dhcp = true, fragmentBytes = 1480, domains = {}, domainSuffixes = [], ignoreUnknownDomains = false, interceptDns = false } = {}) {
+  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1480 || fragmentBytes % 8) {
+    throw new RangeError('UDP fragmentBytes must be a multiple of 8 from 8 to 1480');
+  }
   const ip = ipv4(address);
   const clientIp = ipv4(clientAddress);
   const mask = ipv4(netmask);
@@ -197,7 +203,7 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       dhcp.set(request.subarray(0, 236)); dhcp[0] = 2;
       dhcp.set(clientIp, 16); dhcp.set(ip, 20);
       dhcp.set([99, 130, 83, 99], 236); dhcp.set(options, 240);
-      return udpReply(frame, { sourceMac: serverMac, sourceIp: ip,
+      return udpReply(frame, { fragmentBytes, sourceMac: serverMac, sourceIp: ip,
         targetIp: Uint8Array.from([255, 255, 255, 255]), sourcePort: 67, targetPort: 68,
         payload: dhcp, broadcast: true });
     }
@@ -209,7 +215,7 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       const request = Object.freeze({ address: Array.from(source).join('.'), port: sourcePort,
         localAddress: ip.join('.'), localPort: targetPort, destinationAddress: target.join('.'),
         mac: Array.from(frame.subarray(6, 12)), data: frame.slice(udp + 8, udp + udpLength) });
-      const respond = payload => payload == null ? null : udpReply(frame, { sourceMac: serverMac, sourceIp: ip,
+      const respond = payload => payload == null ? null : udpReply(frame, { fragmentBytes, sourceMac: serverMac, sourceIp: ip,
         targetIp: source, sourcePort: targetPort, targetPort: sourcePort, payload });
       const response = listener(request);
       return response && typeof response.then === 'function' ? response.then(respond) : respond(response);
@@ -253,7 +259,7 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       dns[questionEnd + 9] = 60; write16(dns, questionEnd + 10, 4);
       dns.set(answer, questionEnd + 12);
     }
-    return udpReply(frame, { sourceMac: serverMac,
+    return udpReply(frame, { fragmentBytes, sourceMac: serverMac,
       sourceIp: interceptDns ? frame.subarray(start + 16, start + 20) : ip,
       targetIp: frame.subarray(start + 12, start + 16), sourcePort: 53, targetPort: sourcePort, payload: dns });
   }
@@ -266,12 +272,12 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
     return () => { if (bindings.get(localPort) === handler) bindings.delete(localPort); };
   };
   onFrame.peers = () => [...neighbors].map(([address, mac]) => ({ address, mac: Array.from(mac) }));
-  onFrame.sendUdp = ({ address = clientAddress, port: targetPort, sourcePort = targetPort, data }) => {
+  onFrame.sendUdp = ({ address = clientAddress, port: targetPort, sourcePort = targetPort, data, fragmentBytes: packetFragmentBytes = fragmentBytes }) => {
     const targetIp = ipv4(address);
     const targetMac = same(targetIp, broadcastIp) || same(targetIp, subnetBroadcast) ? broadcastMac : neighbors.get(targetIp.join('.'));
     if (!targetMac) throw new Error('UDP peer has not been discovered by the virtual LAN');
     return udpFrame({ sourceMac: serverMac, targetMac, sourceIp: ip, targetIp,
-      sourcePort, targetPort, payload: data, ipId: nextId++ & 0xffff });
+      sourcePort, targetPort, payload: data, ipId: nextId++ & 0xffff, fragmentBytes: packetFragmentBytes });
   };
   onFrame.close = () => { bindings.clear(); neighbors.clear(); fragments.clear(); };
   return onFrame;

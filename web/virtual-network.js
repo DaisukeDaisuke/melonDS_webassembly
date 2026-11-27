@@ -14,7 +14,7 @@ function handlersByPort(handlers, getHandler) {
   }));
 }
 
-function networkOptions({ address = '10.0.0.1', clientAddress = '10.0.0.100', netmask = '255.255.255.0', dhcp = true }) {
+function networkOptions({ address = '10.0.0.1', clientAddress = '10.0.0.100', netmask = '255.255.255.0', dhcp = true, fragmentBytes = 1480 }) {
   const server = ipv4(address), client = ipv4(clientAddress), mask = ipv4(netmask);
   const maskBits = (mask[0] << 24) | (mask[1] << 16) | (mask[2] << 8) | mask[3];
   const hostMask = ~maskBits >>> 0;
@@ -27,7 +27,10 @@ function networkOptions({ address = '10.0.0.1', clientAddress = '10.0.0.100', ne
     if (!host || host === hostMask || !ip[0] || ip[0] >= 224) throw new RangeError('Expected unicast host addresses');
   }
   if (typeof dhcp !== 'boolean') throw new TypeError('network.dhcp must be a boolean');
-  return { address: server.join('.'), clientAddress: client.join('.'), netmask: mask.join('.'), dhcp };
+  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1480 || fragmentBytes % 8) {
+    throw new RangeError('network.fragmentBytes must be a multiple of 8 from 8 to 1480');
+  }
+  return { address: server.join('.'), clientAddress: client.join('.'), netmask: mask.join('.'), dhcp, fragmentBytes };
 }
 
 function apBssid(value, slot) {
