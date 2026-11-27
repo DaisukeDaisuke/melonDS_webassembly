@@ -12,7 +12,7 @@ fi
 if ! test -f "$root/webassembly/vendor/desmume-source/Disassembler.cpp"; then
   node "$root/webassembly/vendor-disassembler.mjs"
 fi
-emcmake cmake -S "$root/webassembly" -B "$root/webassembly/build" -DCMAKE_BUILD_TYPE=Release
+emcmake cmake -S "$root/webassembly" -B "$root/webassembly/build" -DCMAKE_BUILD_TYPE=Debug
 cmake --build "$root/webassembly/build" --target melonds -j "${BUILD_JOBS:-2}"
 npm ci --prefix "$root/web/sandbox/upstream" --no-audit --no-fund
 node "$root/web/scripts/build-workers.mjs"
