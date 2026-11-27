@@ -134,7 +134,7 @@ test('scripted AP dispatches decoded UDP and TCP payloads by BSSID and port', as
     assert.equal(created.channel, 9);
     const wait = async () => { await network.suspend(); network.resume(); };
     const send = (frame, bssid = created.bssid) => {
-      emit({ type: 'wifi-log', direction: 'TX', instanceId: 0, bssid, payload: frame });
+      emit({ type: 'wifi-tx', direction: 'TX', instanceId: 0, bssid, payload: frame });
       return wait();
     };
     const frame = (protocol, payload) => {

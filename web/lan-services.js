@@ -28,27 +28,32 @@ export function portNumber(value) {
   return value;
 }
 function udpFrame({ sourceMac, targetMac, sourceIp, targetIp, sourcePort, targetPort, payload, ipId = 0 }) {
-  if (!(payload instanceof Uint8Array) || payload.length > 1472) throw new RangeError('UDP payload must be a Uint8Array of 0..1472 bytes');
+  if (!(payload instanceof Uint8Array) || payload.length > 65507) throw new RangeError('UDP payload must be a Uint8Array of 0..65507 bytes');
   portNumber(sourcePort); portNumber(targetPort);
-  const reply = new Uint8Array(ethernet + 20 + 8 + payload.length);
-  reply.set(targetMac);
-  reply.set(sourceMac, 6); write16(reply, 12, 0x0800);
-  const header = ethernet;
-  reply[header] = 0x45; write16(reply, header + 2, reply.length - ethernet);
-  write16(reply, header + 4, ipId);
-  reply[header + 8] = 64; reply[header + 9] = 17;
-  reply.set(sourceIp, header + 12); reply.set(targetIp, header + 16);
-  write16(reply, header + 10, checksum(reply.subarray(header, header + 20)));
-  const outUdp = header + 20;
-  write16(reply, outUdp, sourcePort); write16(reply, outUdp + 2, targetPort);
-  write16(reply, outUdp + 4, payload.length + 8);
-  reply.set(payload, outUdp + 8);
-  const pseudo = new Uint8Array(12 + 8 + payload.length);
+  const udp = new Uint8Array(8 + payload.length);
+  write16(udp, 0, sourcePort); write16(udp, 2, targetPort);
+  write16(udp, 4, udp.length); udp.set(payload, 8);
+  const pseudo = new Uint8Array(12 + udp.length);
   pseudo.set(sourceIp, 0); pseudo.set(targetIp, 4); pseudo[9] = 17;
-  write16(pseudo, 10, 8 + payload.length);
-  pseudo.set(reply.subarray(outUdp), 12);
-  write16(reply, outUdp + 6, checksum(pseudo) || 0xffff);
-  return reply;
+  write16(pseudo, 10, udp.length); pseudo.set(udp, 12);
+  write16(udp, 6, checksum(pseudo) || 0xffff);
+  const frames = [];
+  for (let offset = 0; offset < udp.length; offset += 1480) {
+    const part = udp.subarray(offset, Math.min(offset + 1480, udp.length));
+    const more = offset + part.length < udp.length;
+    const reply = new Uint8Array(ethernet + 20 + part.length);
+    reply.set(targetMac); reply.set(sourceMac, 6); write16(reply, 12, 0x0800);
+    reply[ethernet] = 0x45;
+    write16(reply, ethernet + 2, 20 + part.length);
+    write16(reply, ethernet + 4, ipId);
+    write16(reply, ethernet + 6, (offset >>> 3) | (more ? 0x2000 : 0));
+    reply[ethernet + 8] = 64; reply[ethernet + 9] = 17;
+    reply.set(sourceIp, ethernet + 12); reply.set(targetIp, ethernet + 16);
+    write16(reply, ethernet + 10, checksum(reply.subarray(ethernet, ethernet + 20)));
+    reply.set(part, ethernet + 20);
+    frames.push(reply);
+  }
+  return frames.length === 1 ? frames[0] : frames;
 }
 function udpReply(frame, { broadcast = false, ...fields }) {
   return udpFrame({ ...fields, targetMac: broadcast ? broadcastMac : frame.subarray(6, 12),
@@ -68,7 +73,61 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
 
   const neighbors = new Map();
   const bindings = new Map();
+  const fragments = new Map();
   let nextId = 1;
+  function reassembleIpv4(frame, ihl, total) {
+    const flags = u16(frame, ethernet + 6);
+    if (!(flags & 0x3fff)) return frame;
+    const offset = (flags & 0x1fff) * 8, more = !!(flags & 0x2000);
+    const size = total - ihl;
+    if (!size || (more && size % 8) || offset + size > 65515) return null;
+    const key = [
+      ...frame.subarray(6, 12), ...frame.subarray(ethernet + 12, ethernet + 20),
+      frame[ethernet + 9], u16(frame, ethernet + 4)
+    ].join('.');
+    const now = Date.now();
+    for (const [id, value] of fragments) if (now - value.time > 15000) fragments.delete(id);
+    let entry = fragments.get(key);
+    if (!entry) {
+      if (fragments.size >= 64) fragments.delete(fragments.keys().next().value);
+      entry = { time: now, pieces: new Map(), header: null, end: null };
+      fragments.set(key, entry);
+    }
+    entry.time = now;
+    const bytes = frame.slice(ethernet + ihl, ethernet + total);
+    for (const [at, previous] of entry.pieces) {
+      if (offset < at + previous.length && at < offset + size) {
+        if (offset === at && previous.length === size &&
+          previous.every((value, index) => value === bytes[index])) return null;
+        fragments.delete(key); return null;
+      }
+    }
+    if (entry.end !== null && offset + size > entry.end) { fragments.delete(key); return null; }
+    if (!more) {
+      if (entry.end !== null && entry.end !== offset + size) { fragments.delete(key); return null; }
+      entry.end = offset + size;
+    }
+    if (offset === 0) entry.header = frame.slice(0, ethernet + ihl);
+    entry.pieces.set(offset, bytes);
+    if (!entry.header || entry.end === null) return null;
+    const headerSize = (entry.header[ethernet] & 15) * 4;
+    if (entry.end + headerSize > 65535) { fragments.delete(key); return null; }
+    const result = new Uint8Array(ethernet + headerSize + entry.end);
+    result.set(entry.header);
+    let cursor = 0;
+    for (const [at, part] of [...entry.pieces].sort((a, b) => a[0] - b[0])) {
+      if (at !== cursor) return null;
+      result.set(part, ethernet + headerSize + at);
+      cursor += part.length;
+    }
+    if (cursor !== entry.end) return null;
+    write16(result, ethernet + 2, headerSize + entry.end);
+    write16(result, ethernet + 6, 0);
+    write16(result, ethernet + 10, 0);
+    write16(result, ethernet + 10, checksum(result.subarray(ethernet, ethernet + headerSize)));
+    fragments.delete(key);
+    return result;
+  }
   function remember(addressBytes, macBytes) {
     if (addressBytes.length !== 4 || macBytes.length !== 6 || (macBytes[0] & 1)
         || macBytes.every(v => v === 0) || addressBytes.every(v => v === 0)
@@ -94,12 +153,14 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
       reply.set(frame.subarray(22, 28), 32); reply.set(frame.subarray(28, 32), 38);
       return reply;
     }
-    if (type !== 0x0800 || frame.length < 42) return null;
+    if (type !== 0x0800 || frame.length < 34) return null;
     const start = ethernet;
-    const ihl = (frame[start] & 15) * 4;
-    const total = u16(frame, start + 2);
-    if ((frame[start] >>> 4) !== 4 || ihl < 20 || total < ihl || start + total > frame.length
-      || (u16(frame, start + 6) & 0x3fff) !== 0) return null;
+    let ihl = (frame[start] & 15) * 4;
+    let total = u16(frame, start + 2);
+    if ((frame[start] >>> 4) !== 4 || ihl < 20 || total < ihl || start + total > frame.length) return null;
+    frame = reassembleIpv4(frame, ihl, total);
+    if (!frame || frame.length < 42) return null;
+    ihl = (frame[start] & 15) * 4; total = u16(frame, start + 2);
     remember(frame.subarray(start + 12, start + 16), frame.subarray(6, 12));
     if (frame[start + 9] !== 17 || total < ihl + 8) return null;
     const udp = start + ihl;
@@ -212,6 +273,6 @@ export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0
     return udpFrame({ sourceMac: serverMac, targetMac, sourceIp: ip, targetIp,
       sourcePort, targetPort, payload: data, ipId: nextId++ & 0xffff });
   };
-  onFrame.close = () => { bindings.clear(); neighbors.clear(); };
+  onFrame.close = () => { bindings.clear(); neighbors.clear(); fragments.clear(); };
   return onFrame;
 }

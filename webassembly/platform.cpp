@@ -25,6 +25,7 @@ static std::array<bool, 16> netEnabled = [] {
     std::array<bool, 16> result {}; result.fill(true); return result;
 }();
 static std::deque<WebNetFrame> netEvents;
+static std::deque<WebNetFrame> netOutgoing;
 static u32 netDropped = 0;
 int WebNetEnqueue(int instanceId, const u8* data, int length, const u8* bssid) {
     if (instanceId < 0 || instanceId >= 16 || !data || length < 14 || length > 2048) return -1;
@@ -41,6 +42,7 @@ void WebNetClear(int instanceId) {
     if (instanceId < 0 || instanceId >= 16) return;
     std::lock_guard<std::mutex> lock(netLock);
     netPending[instanceId].clear();
+    netOutgoing.erase(std::remove_if(netOutgoing.begin(), netOutgoing.end(), [=](const WebNetFrame& frame) { return frame.instanceId == instanceId; }), netOutgoing.end());
 }
 void WebNetClearAccessPoint(int instanceId, const u8* bssid) {
     std::lock_guard<std::mutex> lock(netLock);
@@ -50,12 +52,14 @@ void WebNetClearAccessPoint(int instanceId, const u8* bssid) {
     auto& pending = netPending[instanceId];
     pending.erase(std::remove_if(pending.begin(), pending.end(), matches), pending.end());
     netEvents.erase(std::remove_if(netEvents.begin(), netEvents.end(), matches), netEvents.end());
+    netOutgoing.erase(std::remove_if(netOutgoing.begin(), netOutgoing.end(), matches), netOutgoing.end());
 }
 int WebNetSetEnabled(int instanceId, bool enabled) {
     if (instanceId < 0 || instanceId >= 16) return -1;
     std::lock_guard<std::mutex> lock(netLock);
     netEnabled[instanceId] = enabled;
     netPending[instanceId].clear();
+    if (!enabled) netOutgoing.erase(std::remove_if(netOutgoing.begin(), netOutgoing.end(), [=](const WebNetFrame& frame) { return frame.instanceId == instanceId; }), netOutgoing.end());
     return 0;
 }
 int WebNetGetEnabled(int instanceId) {
@@ -69,6 +73,16 @@ int WebNetDrain(WebNetFrame* out, int capacity, u32* dropped) {
     if (dropped) { *dropped = netDropped; netDropped = 0; }
     int count = std::min(capacity, static_cast<int>(netEvents.size()));
     for (int i = 0; i < count; i++) { out[i] = netEvents.front(); netEvents.pop_front(); }
+    return count;
+}
+int WebNetDrainOutgoing(WebNetFrame* out, int capacity) {
+    if (!out || capacity <= 0) return 0;
+    std::lock_guard<std::mutex> lock(netLock);
+    int count = std::min(capacity, static_cast<int>(netOutgoing.size()));
+    for (int i = 0; i < count; ++i) {
+        out[i] = netOutgoing.front();
+        netOutgoing.pop_front();
+    }
     return count;
 }
 static void recordNet(const WebNetFrame& frame) {
@@ -101,6 +115,7 @@ void WebNetDoTransportState(Savestate* state) {
     };
     for (auto& frames : netPending) queue(frames, 256);
     queue(netEvents, 512); state->Var32(&netDropped);
+    if (!state->Saving) netOutgoing.clear();
 }
 
 void SignalStop(StopReason, void*) {}
@@ -197,6 +212,7 @@ int Net_SendPacket(u8* data, int len, void* userdata) {
     memcpy(frame.data.data(), data, len);
     if (const auto* bssid = networkBssid(userdata)) std::copy_n(bssid, 6, frame.bssid.begin());
     std::lock_guard<std::mutex> lock(netLock);
+    if (netEnabled[instance]) netOutgoing.push_back(frame);
     recordNet(frame);
     return 0; // melonDS platform convention: zero means submitted.
 }
