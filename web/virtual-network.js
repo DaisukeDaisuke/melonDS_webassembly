@@ -63,8 +63,6 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
   async function createAccessPoint({ instanceId: id, ssid, security = 'open', key = '', channel = 6, bssid,
     network = {}, udp = {}, tcp = {} } = {}) {
     instanceId(id);
-    if (typeof ssid !== 'string' || !ssid.length || new TextEncoder().encode(ssid).length > 32) throw new TypeError('SSID must be 1..32 UTF-8 bytes');
-    if (security !== 'open' || key !== '') throw new TypeError('The virtual Wi-Fi core supports open access points only');
     if (!Number.isInteger(channel) || channel < 1 || channel > 14) throw new RangeError('Channel must be 1..14');
     const config = networkOptions(network);
     const udpHandlers = handlersByPort(udp, handler => handler);
@@ -91,7 +89,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
         close: () => { lan.close(); stream.close(); },
         suspend: stream.suspend, resume: stream.resume, settle: stream.settle };
       const isCurrent = () => accessPoints.get(id) === points && points.get(macKey) === point;
-      await api.configureAccessPoint({ instanceId: id, slot, ssid, channel, bssid: mac });
+      await api.configureAccessPoint({ instanceId: id, slot, ssid, security, key, channel, bssid: mac });
       points.set(macKey, point);
       accessPoints.set(id, points);
       if (suspended) point.suspend();

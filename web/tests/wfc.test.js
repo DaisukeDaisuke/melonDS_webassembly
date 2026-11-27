@@ -5,6 +5,7 @@ import { createDq9WfcHandler, httpBytes } from '../dq9-wfc.js';
 import { createLanService } from '../lan-services.js';
 import { createTcpService } from '../tcp-service.js';
 import { createVirtualNetwork } from '../virtual-network.js';
+import { apBytes, apSecurity } from '../ap-profile.js';
 import { createSsl3Server } from '../dq9/ssl3.js';
 import { dlcPath } from '../file-store.js';
 import { uploadPath } from '../file-explorer.js';
@@ -275,3 +276,28 @@ test(`SSLv3 RSA/RC4-${algorithm} handshake decrypts an HTTP request on the priva
   assert.equal(response.subarray(-body.length).toString(), 'hello');
 });
 }
+
+
+test('AP profiles forward byte arrays and binary views without frontend length policies', async () => {
+  const operations = [];
+  const network = createVirtualNetwork({
+    subscribe() { return () => {}; },
+    async configureAccessPoint(args) { operations.push(args); },
+    async removeAccessPoint() {},
+    async injectNetworkFrame() {}
+  });
+  const ssid = Uint8Array.from({ length: 40 }, (_, i) => (i * 13) & 255);
+  const backing = Uint8Array.from({ length: 301 }, (_, i) => (i * 17) & 255);
+  const key = new DataView(backing.buffer, 1, 299);
+  try {
+    await network.createAccessPoint({ instanceId: 0, ssid, key, security: 'open' });
+    await network.createAccessPoint({ instanceId: 0, ssid: new ArrayBuffer(0), key: [0, 255, 128], security: 'wep104' });
+    assert.deepEqual(apBytes(operations[0].ssid), ssid);
+    assert.deepEqual(apBytes(operations[0].key), backing.subarray(1, 300));
+    assert.equal(apSecurity(operations[0].security), 0);
+    assert.equal(apBytes(operations[1].ssid).length, 0);
+    assert.deepEqual(apBytes(operations[1].key), Uint8Array.of(0, 255, 128));
+    assert.equal(apSecurity(operations[1].security), 2);
+    assert.deepEqual(apBytes('é'), Uint8Array.of(0xc3, 0xa9));
+  } finally { await network.close(); }
+});

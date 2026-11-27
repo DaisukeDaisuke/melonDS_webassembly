@@ -1,6 +1,7 @@
 import createModule from './dist/melonds.js';
 import pthreadSource from './dist/melonds.worker.js';
 import { decodeInstructions } from './disassemble.js';
+import { apBytes, apSecurity } from './ap-profile.js';
 
 export async function startEngine(moduleURL) {
 let wasm;
@@ -203,14 +204,15 @@ function execute(name, args) {
     const { slot } = args;
     if (!Number.isInteger(slot) || slot < 1 || slot > 7) throw RangeError('Script AP slot must be 1..7');
     if (name === 'removeAccessPoint') return success(call('web_ap_remove', id, slot), name);
-    const ssid = new TextEncoder().encode(args.ssid);
+    const ssid = apBytes(args.ssid), key = apBytes(args.key);
+    const security = apSecurity(args.security);
     const bssid = Uint8Array.from(args.bssid);
-    if (!ssid.length || ssid.length > 32 || bssid.length !== 6) throw Error('Invalid SSID or BSSID');
-    return withBytes(bssid, mac => withBytes(ssid, pointer => {
-      const result = call('web_ap_configure', id, slot, pointer, ssid.length, args.channel, mac);
+    if (bssid.length !== 6) throw Error('BSSID must have six octets');
+    return withBytes(bssid, mac => withBytes(ssid, pointer => withBytes(key, keyPointer => {
+      const result = call('web_ap_configure', id, slot, pointer, ssid.length, security, keyPointer, key.length, args.channel, mac);
       if (result === -3) throw Error('Load a DS firmware file before creating an access point');
       return success(result, name);
-    }));
+    })));
   }
   if (name === 'setNetworkBackend') {
     if (!['virtual', 'disabled'].includes(args.backend)) throw Error('backend must be virtual or disabled');

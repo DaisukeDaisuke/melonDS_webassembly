@@ -252,7 +252,7 @@ await melonds.setNetworkBackend({instanceId:0,backend:'virtual'});
 DLCは`melondsFiles`/DLCファイルツールのブラウザー内ファイルから配信する。
 `conntest`応答は仕様のraw HTTPレスポンスを保ち、通常HTTP整形を通さない。
 ### スクリプトから仮想APを作成
-対象のDSインスタンスにファームウェアを読み込んでから呼び出す。APごとにSSID、BSSID（省略可）、チャネル、IPv4ネットワーク、UDP/TCPハンドラを指定できる。現在のコアで使用できる無線設定は `security: 'open'` と空の `key`。各インスタンスに最大7個のスクリプトAPを作成できる。
+対象のDSインスタンスにファームウェアを読み込んでから呼び出す。APごとにSSID、BSSID（省略可）、チャネル、IPv4ネットワーク、UDP/TCPハンドラを指定できる。SSIDとkeyはUTF-8文字列、`Uint8Array`、`ArrayBuffer`、バイナリビュー（`DataView`など）、またはバイト配列を受け付ける。JavaScript側で長さ制限は設けない。SSIDは無線フレームの1バイト長フィールドに収まる0〜255バイトをコアで扱い、keyは可変長で保持する。`security` は `open`、`wep40`、`wep104` をコアに渡すが、現行コアのWEP暗号処理は未実装であり、WEP通信が成立することを保証しない。各インスタンスに最大7個のスクリプトAPを作成できる。
 ```js
 const ap = await melondsVirtualNetwork.createAccessPoint({
   instanceId: 0,

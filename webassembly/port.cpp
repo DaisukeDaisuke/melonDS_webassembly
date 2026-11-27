@@ -1005,12 +1005,13 @@ EMSCRIPTEN_KEEPALIVE int web_prepare_virtual_ap(int id) {
     return 0;
 }
 EMSCRIPTEN_KEEPALIVE int web_ap_configure(int id, int slot, const melonDS::u8* ssid, int length,
+                                         int security, const melonDS::u8* key, int keyLength,
                                          int channel, const melonDS::u8* bssid) {
     auto* inst = get(id);
     if (!inst) return -1;
     std::lock_guard<std::mutex> guard(inst->coreMutex);
     if (!(inst->systemFiles & 4)) return -3;
-    if (!inst->nds->Wifi.ConfigureAccessPoint(slot, ssid, length, 0, nullptr, 0, channel, bssid)) return -2;
+    if (!inst->nds->Wifi.ConfigureAccessPoint(slot, ssid, length, security, key, keyLength, channel, bssid)) return -2;
     melonDS::Platform::WebNetClearAccessPoint(id, bssid);
     if (!melonDS::Platform::WebNetGetEnabled(id)) melonDS::Platform::WebNetSetEnabled(id, true);
     return 0;
