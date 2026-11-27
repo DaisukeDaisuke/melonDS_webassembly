@@ -3,10 +3,13 @@ project(melonds_web LANGUAGES C CXX)
 if(NOT EMSCRIPTEN)
   message(FATAL_ERROR "Configure with emcmake cmake")
 endif()
-# Use the requested optimization consistently for the core, dependencies and final Wasm link.
-set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
-set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-O2" CACHE STRING "" FORCE)
+# Reproduce guest faults with unoptimized WebAssembly and full DWARF symbols.
+# The assertions below are explicitly disabled as requested; -g3 still
+# provides symbols but does NOT enable libc++ or Emscripten runtime checks.
+set(WASM_DEBUG_FLAGS "-O0 -g3 -DNDEBUG -D_LIBCPP_ASSERTIONS=0 -D_LIBCPP_ENABLE_ASSERTIONS=0")
+set(CMAKE_C_FLAGS_DEBUG "${WASM_DEBUG_FLAGS}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS_DEBUG "${WASM_DEBUG_FLAGS}" CACHE STRING "" FORCE)
+set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-O0 -g3 -sASSERTIONS=0" CACHE STRING "" FORCE)
 set(BUILD_QT_SDL OFF CACHE BOOL "" FORCE)
 set(ENABLE_JIT OFF CACHE BOOL "" FORCE)
 set(ENABLE_OGLRENDERER OFF CACHE BOOL "" FORCE)
@@ -14,11 +17,15 @@ set(ENABLE_OGLRENDERER OFF CACHE BOOL "" FORCE)
 # Keep the native stub enabled until that upstream compile guard is fixed.
 set(ENABLE_GDBSTUB ON CACHE BOOL "" FORCE)
 set(ENABLE_LTO_RELEASE OFF CACHE BOOL "" FORCE)
+set(ENABLE_LTO OFF CACHE BOOL "" FORCE)
 add_subdirectory(../melonDS_w ${CMAKE_BINARY_DIR}/melonDS)
 target_compile_options(core PUBLIC -pthread)
 target_compile_definitions(core PRIVATE WEB_DEBUGGER)
 target_include_directories(core PRIVATE ${PROJECT_SOURCE_DIR})
 target_compile_options(teakra PUBLIC -pthread)
+# melonDS_w adds -Og to teakra in Debug builds; our later -O0 wins.
+# The upstream workaround applies to native Windows builds, not Emscripten.
+target_compile_options(teakra PRIVATE "$<$<CONFIG:Debug>:-O0>")
 add_executable(melonds port.cpp platform.cpp desmume-state.cpp disassembler-port.cpp vendor/desmume-source/Disassembler.cpp ../melonDS_w/src/net/LocalMP.cpp)
 target_link_libraries(melonds PRIVATE core)
 target_include_directories(melonds PRIVATE ../melonDS_w/src ../melonDS_w/src/net)

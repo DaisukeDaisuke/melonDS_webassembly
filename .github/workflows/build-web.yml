@@ -57,7 +57,7 @@ jobs:
           if ! test -f webassembly/vendor/desmume-source/Disassembler.cpp; then
             node webassembly/vendor-disassembler.mjs
           fi
-          emcmake cmake -S webassembly -B webassembly/build -DCMAKE_BUILD_TYPE=Release
+          emcmake cmake -S webassembly -B webassembly/build -DCMAKE_BUILD_TYPE=Debug
           cmake --build webassembly/build --target melonds -j 2
 
       - name: Verify melonDS WebAssembly output
