@@ -53,6 +53,29 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
   let suspended = false;
   const diagnostic = (id, protocol, summary, detail = '', direction = 'TX') => onEvent({ type: 'wifi-log', instanceId: id, direction, timestamp: new Date().toLocaleTimeString(), packetType: protocol, logical: true, length: 0, decoded: { source: direction === 'TX' ? `#${id}` : 'WFC', destination: direction === 'TX' ? 'WFC' : `#${id}`, protocol, summary, detail } });
   const files = createFileStore();
+  const outgoing = new Map();
+  function sendFrames(id, data, bssid) {
+    const work = (outgoing.get(id) || Promise.resolve()).catch(() => {}).then(async () => {
+      let result;
+      for (const frame of Array.isArray(data) ? data : [data]) {
+        const deadline = Date.now() + 30000;
+        for (;;) {
+          try {
+            result = await api.injectNetworkFrame({ instanceId: id, data: frame, bssid });
+            break;
+          } catch (error) {
+            // -2 is the native RX queue-full signal. Do not drop a fragment.
+            if (!/native operation failed \(-2\)/.test(String(error?.message)) || Date.now() >= deadline) throw error;
+            await new Promise(resolve => setTimeout(resolve, 4));
+          }
+        }
+      }
+      return result;
+    });
+    outgoing.set(id, work);
+    work.finally(() => { if (outgoing.get(id) === work) outgoing.delete(id); }).catch(() => {});
+    return work;
+  }
   function mutateAccessPoints(id, run) {
     const operation = (apMutations.get(id) || Promise.resolve()).catch(() => {}).then(run);
     apMutations.set(id, operation);
@@ -80,7 +103,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
       for (const [port, handler] of udpHandlers) lan.bindUdp(port, handler);
       const emitFrame = data => {
         if (!isCurrent()) throw Error('The virtual access point is closed');
-        return api.injectNetworkFrame({ instanceId: id, data, bssid: mac });
+        return sendFrames(id, data, mac);
       };
       const stream = createTcpService({ address: config.address, mac, emitFrame,
         onDiagnostic: message => diagnostic(id, 'TCP', message, message) });
@@ -123,7 +146,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
   function registerNetwork({ instanceId: id, address = '10.0.0.1', clientAddress = '10.0.0.100',
     mac = [0x02, 0x4d, 0x44, 0x53, 0, 1], ...options } = {}) {
     const lan = createLanService({ ...options, address, clientAddress, mac });
-    const emitFrame = data => api.injectNetworkFrame({ instanceId: id, data });
+    const emitFrame = data => sendFrames(id, data);
     const tcp = createTcpService({ address, mac, onRequest: options.onRequest,
       createSecureSession: options.createSecureSession, emitFrame,
       onDiagnostic: message => diagnostic(id, 'TCP', message, message) });
@@ -165,7 +188,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
     const createSecureSession = certificatePem
       ? createSsl3Server({ certificatePem, privateKeyPem, chainPem, onRequest, onDiagnostic: message => diagnostic(id, 'SSLv3', message, message) }) : null;
     const tcp = createTcpService({ address, mac, onRequest, createSecureSession, onDiagnostic: message => diagnostic(id, 'TCP', message, message),
-      emitFrame: frame => api.injectNetworkFrame({ instanceId: id, data: frame }) });
+      emitFrame: frame => sendFrames(id, frame) });
     const onFrame = frame => lan(frame) || tcp(frame);
     onFrame.close = () => tcp.close();
     onFrame.suspend = () => tcp.suspend();
@@ -179,14 +202,14 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
     return Object.freeze({ setDlc: (game, files) => handler.setDlc(game, files), unregister });
   }
   const unsubscribe = api.subscribe(event => {
-    if (event.type !== 'wifi-log' || event.direction !== 'TX' || event.held) return;
+    if (event.type !== 'wifi-tx' || event.held) return;
     const id = event.instanceId;
     const mac = event.bssid?.join(':');
     const point = accessPoints.get(id)?.get(mac);
     const server = point?.onFrame || servers.get(id);
     if (!server) return;
     const isCurrent = () => point ? accessPoints.get(id)?.get(mac) === point : servers.get(id) === server;
-    const emitFrame = point?.emitFrame || (data => api.injectNetworkFrame({ instanceId: id, data }));
+    const emitFrame = point?.emitFrame || (data => sendFrames(id, data));
     const work = (pending.get(id) || Promise.resolve()).catch(() => {}).then(() => {
       if (!isCurrent()) return null;
       return server(new Uint8Array(event.payload), { instanceId: id, timestamp: event.timestamp });

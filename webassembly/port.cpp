@@ -1060,6 +1060,8 @@ EMSCRIPTEN_KEEPALIVE int web_log_entry(int index, unsigned* meta, melonDS::u8* p
 static std::array<melonDS::Platform::WebNetFrame, 512> netLogs;
 static unsigned netLogCount;
 static unsigned netLogDropped;
+static std::array<melonDS::Platform::WebNetFrame, 256> netTx;
+static unsigned netTxCount;
 EMSCRIPTEN_KEEPALIVE int web_net_enqueue(int id, const melonDS::u8* bytes, int length, const melonDS::u8* bssid) {
     if (!get(id)) return -1;
     return melonDS::Platform::WebNetEnqueue(id, bytes, length, bssid);
@@ -1088,6 +1090,23 @@ EMSCRIPTEN_KEEPALIVE int web_net_log_entry(int index, unsigned* meta, melonDS::u
     meta[4] = netLogDropped;
     std::memcpy(meta + 5, record.bssid.data(), record.bssid.size());
     memcpy(payload, record.data.data(), record.length);
+    return record.length;
+}
+EMSCRIPTEN_KEEPALIVE int web_net_tx_count() {
+    netTxCount = melonDS::Platform::WebNetDrainOutgoing(netTx.data(), netTx.size());
+    return netTxCount;
+}
+EMSCRIPTEN_KEEPALIVE int web_net_tx_entry(int index, unsigned* meta, melonDS::u8* payload, int capacity) {
+    if (index < 0 || static_cast<unsigned>(index) >= netTxCount || !meta || !payload) return -1;
+    const auto& record = netTx[index];
+    if (capacity < record.length) return -2;
+    meta[0] = record.timestamp & 0xffffffff;
+    meta[1] = record.timestamp >> 32;
+    meta[2] = record.instanceId;
+    meta[3] = 0;
+    meta[4] = 0;
+    std::memcpy(meta + 5, record.bssid.data(), record.bssid.size());
+    std::memcpy(payload, record.data.data(), record.length);
     return record.length;
 }
 }

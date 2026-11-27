@@ -101,7 +101,7 @@ function drainInput() {
   }
 }
 function execute(name, args) {
-  if (name === 'workspaceFlush') { drainLogs(true); drainWifi(); return true; }
+  if (name === 'workspaceFlush') { drainLogs(true); drainWifiTx(); drainWifi(); return true; }
   if (name === 'workspaceTransport') {
     if (args.data) {
       const result = withBytes(new Uint8Array(args.data), pointer => success(call('web_transport_import', pointer, args.data.length), name));
@@ -677,6 +677,22 @@ function emit(event) {
   }
   postMessage({ type: 'event', event });
 }
+function drainWifiTx() {
+  const count = call('web_net_tx_count');
+  if (!count) return;
+  const meta = call('malloc', 28), payload = call('malloc', 2048);
+  try {
+    for (let i = 0; i < count; ++i) {
+      const length = call('web_net_tx_entry', i, meta, payload, 2048);
+      if (length < 0) continue;
+      const view = new DataView(wasm.HEAPU8.buffer, meta, 20);
+      emit({ type: 'wifi-tx', instanceId: view.getInt32(8, true), direction: 'TX',
+        timestamp: String(view.getUint32(4, true)) + ':' + String(view.getUint32(0, true)),
+        bssid: Array.from(wasm.HEAPU8.subarray(meta + 20, meta + 26)),
+        payload: Array.from(wasm.HEAPU8.slice(payload, payload + length)) });
+    }
+  } finally { call('free', meta); call('free', payload); }
+}
 function drainWifi() {
   const count = call('web_net_log_count');
   if (!count) return;
@@ -762,6 +778,7 @@ wasm = await createModule({
 postMessage({ type: 'ready' });
 setInterval(() => {
   drainInput();
+  drainWifiTx();
   for (const id of ids) { pollFrame(id); pollAudio(id); }
   drainLogs();
   drainWifi();
