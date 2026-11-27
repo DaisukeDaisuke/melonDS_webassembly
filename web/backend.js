@@ -22,6 +22,32 @@ export function createWasmBackend() {
       }
       return;
     }
+    // Wi-Fi TX can arrive far faster than application handlers can process it.
+    // Dispatch a bounded native batch, yield to rendering, then acknowledge only
+    // after the scripted AP has finished consuming every frame.
+    if (data.type === 'wifi-tx-batch') {
+      const processBatch = async () => {
+        const completions = [];
+        let dispatched = 0;
+        for (const event of data.events) {
+          for (const listener of listeners) {
+            try {
+              const completion = listener(event);
+              if (completion && typeof completion.then === 'function') completions.push(completion);
+            } catch (error) {
+              queueMicrotask(() => { throw error; });
+            }
+          }
+          // The main thread must be able to paint and process user input even
+          // when the guest continuously emits back-to-back Wi-Fi frames.
+          if (++dispatched % 16 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        }
+        await Promise.allSettled(completions);
+      };
+      void processBatch().catch(error => console.error('Wi-Fi TX batch processing failed', error))
+        .finally(() => worker.postMessage({ type: 'wifi-tx-consumed', wifiToken: data.wifiToken }));
+      return;
+    }
     if (data.type === 'events') {
       try {
         for (const event of data.events) {

@@ -19,6 +19,7 @@ const audibleInstances = new Set();
 const lastFrames = new Map();
 const pendingFrames = new Map();
 const pendingLogBatches = new Set();
+let pendingWifiTxBatch = null;
 let notificationSerial = 0;
 const debugWaiters = new Map();
 const inputWaiters = new Map();
@@ -678,20 +679,29 @@ function emit(event) {
   postMessage({ type: 'event', event });
 }
 function drainWifiTx() {
+  // Do not drain the native TX queue again before the browser consumes the
+  // previous batch. Native frames remain queued, in order and without loss.
+  if (pendingWifiTxBatch !== null) return;
   const count = call('web_net_tx_count');
   if (!count) return;
   const meta = call('malloc', 28), payload = call('malloc', 2048);
+  const events = [];
   try {
     for (let i = 0; i < count; ++i) {
       const length = call('web_net_tx_entry', i, meta, payload, 2048);
       if (length < 0) continue;
       const view = new DataView(wasm.HEAPU8.buffer, meta, 20);
-      emit({ type: 'wifi-tx', instanceId: view.getInt32(8, true), direction: 'TX',
+      events.push({ type: 'wifi-tx', instanceId: view.getInt32(8, true), direction: 'TX',
         timestamp: String(view.getUint32(4, true)) + ':' + String(view.getUint32(0, true)),
         bssid: Array.from(wasm.HEAPU8.subarray(meta + 20, meta + 26)),
         payload: Array.from(wasm.HEAPU8.slice(payload, payload + length)) });
     }
   } finally { call('free', meta); call('free', payload); }
+  if (events.length) {
+    const wifiToken = ++notificationSerial;
+    pendingWifiTxBatch = wifiToken;
+    postMessage({ type: 'wifi-tx-batch', events, wifiToken });
+  }
 }
 function drainWifi() {
   const count = call('web_net_log_count');
@@ -739,6 +749,10 @@ onmessage = ({ data }) => {
     return;
   }
   if (data.type === 'logs-consumed') { pendingLogBatches.delete(data.logToken); return; }
+  if (data.type === 'wifi-tx-consumed') {
+    if (pendingWifiTxBatch === data.wifiToken) pendingWifiTxBatch = null;
+    return;
+  }
   if (data.type === 'screens') {
     for (const id of data.instanceIds) if (!visibleScreens.has(id)) lastFrames.set(id, -1);
     visibleScreens.clear();

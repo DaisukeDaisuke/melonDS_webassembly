@@ -384,7 +384,14 @@ export function createScriptBackend(native) {
         }
       }
     }
-    for (const listener of subscribers) listener(event);
+    // Propagate asynchronous completion for Wi-Fi TX so the native dispatcher
+    // cannot flood the page while a scripted AP is still processing frames.
+    const completions = [];
+    for (const listener of subscribers) {
+      const completion = listener(event);
+      if (event.type === 'wifi-tx' && completion && typeof completion.then === 'function') completions.push(completion);
+    }
+    if (completions.length) return Promise.allSettled(completions);
   });
   return {
     async execute(name, args = {}) {

@@ -185,6 +185,42 @@ test('scripted AP dispatches opaque UDP and TCP payloads by BSSID and port', asy
   } finally { await network.close(); }
 });
 
+test('Wi-Fi TX flood keeps frame order and yields to main-thread timers', async () => {
+  const replies = [], handled = [];
+  let deliver;
+  const network = createVirtualNetwork({
+    subscribe(listener) { deliver = listener; return () => {}; },
+    async configureAccessPoint() {},
+    async removeAccessPoint() {},
+    async injectNetworkFrame(args) { replies.push(args.data); return { length: args.data.length }; }
+  });
+  const ap = await network.createAccessPoint({ instanceId: 0, ssid: 'FloodAP', network: { dhcp: false },
+    udp: { 58881: async packet => { handled.push(packet.data[0]); return Uint8Array.of(packet.data[0]); } } });
+  try {
+    const mkPacket = i => {
+      const frame = new Uint8Array(43);
+      frame.set([0xff,0xff,0xff,0xff,0xff,0xff], 0);
+      frame.set([0, 22, 86, 131, 49, 249], 6);
+      frame.set([0x08,0x00,0x45,0x00,0,29,0,0,0,0,64,17], 12);
+      frame.set([10,0,0,100], 26);
+      frame.set([255,255,255,255], 30);
+      frame.set([0xe6,0x01,0xe6,0x01,0,9], 34);
+      frame[42] = i;
+      return frame;
+    };
+    const jobs = Array.from({ length: 128 }, (_, i) => deliver({
+      type: 'wifi-tx', instanceId: 0, direction: 'TX',
+      bssid: ap.bssid.split(':').map(s => parseInt(s, 16)),
+      timestamp: String(i), payload: Array.from(mkPacket(i))
+    }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(handled.length < 128, 'the dispatcher should yield before draining the entire burst');
+    await Promise.all(jobs);
+    assert.deepEqual(handled, Array.from({ length: 128 }, (_, i) => i));
+    assert.deepEqual(replies.map(frame => frame[42]), handled);
+  } finally { await ap.close(); await network.close(); }
+});
+
 for (const [suite, algorithm, macLength, padLength] of [[5, 'sha1', 20, 40], [4, 'md5', 16, 48]]) {
 test(`SSLv3 RSA/RC4-${algorithm} handshake decrypts an HTTP request on the private LAN`, async () => {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 1024 });

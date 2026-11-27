@@ -71,7 +71,9 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
   const accessPoints = new Map();
   const apMutations = new Map();
   const pending = new Map();
+  const dispatchCounts = new Map();
   let suspended = false;
+  const yieldToBrowser = () => new Promise(resolve => setTimeout(resolve, 0));
   const diagnostic = (id, protocol, summary, detail = '', direction = 'TX') => onEvent({ type: 'wifi-log', instanceId: id, direction, timestamp: new Date().toLocaleTimeString(), packetType: protocol, logical: true, length: 0, decoded: { source: direction === 'TX' ? `#${id}` : 'WFC', destination: direction === 'TX' ? 'WFC' : `#${id}`, protocol, summary, detail } });
   const files = createFileStore();
   const outgoing = new Map();
@@ -233,7 +235,12 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
     if (!server) return;
     const isCurrent = () => point ? accessPoints.get(id)?.get(mac) === point : servers.get(id) === server;
     const emitFrame = point?.emitFrame || (data => sendFrames(id, data));
-    const work = (pending.get(id) || Promise.resolve()).catch(() => {}).then(() => {
+    const work = (pending.get(id) || Promise.resolve()).catch(() => {}).then(async () => {
+      if (!isCurrent()) return null;
+      const count = (dispatchCounts.get(id) || 0) + 1;
+      dispatchCounts.set(id, count % 8);
+      // A permanently active guest must not create a microtask-only loop.
+      if (count % 8 === 0) await yieldToBrowser();
       if (!isCurrent()) return null;
       return server(new Uint8Array(event.payload), { instanceId: id, timestamp: event.timestamp });
     }).then(async reply => {
@@ -247,7 +254,8 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
       }
     }).catch(error => { diagnostic(event.instanceId, 'ERROR', error.message || String(error)); console.error('Virtual network server error', error); });
     pending.set(id, work);
-    work.finally(() => { if (pending.get(id) === work) pending.delete(id); });
+    work.finally(() => { if (pending.get(id) === work) pending.delete(id); }).catch(() => {});
+    return work;
   });
   return Object.freeze({
     files,
@@ -301,6 +309,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
       servers.get(id)?.close?.(); servers.delete(id);
       for (const point of accessPoints.get(id)?.values() || []) point.close();
       accessPoints.delete(id);
+      dispatchCounts.delete(id);
     },
     async close() {
       unsubscribe();
