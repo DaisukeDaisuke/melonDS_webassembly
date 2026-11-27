@@ -9,15 +9,28 @@ template<class Frame> struct CallStackLens {
     std::vector<Lane> lanes;
     size_t active = 0;
     unsigned nextId = 1;
+    // Remember a failed SP/mode lookup until the lane set changes.
+    // Otherwise a guest running with an unmatched stack scans all lanes
+    // for every instruction, which dominates ARM execution under WebDebugger.
+    bool missValid = false;
+    unsigned missSp = 0, missMode = 0;
     static unsigned distance(unsigned a, unsigned b) { return a > b ? a - b : b - a; }
-    void clear() { lanes.clear(); active = 0; nextId = 1; }
+    void clear() { lanes.clear(); active = 0; nextId = 1; missValid = false; }
     void pruneEmpty() {
+        missValid = false;
         const unsigned activeId = active < lanes.size() ? lanes[active].id : 0;
         lanes.erase(std::remove_if(lanes.begin(), lanes.end(), [](const Lane& lane) { return lane.frames.empty(); }), lanes.end());
         active = lanes.size();
         for (size_t n = 0; n < lanes.size(); ++n) if (lanes[n].id == activeId) { active = n; break; }
     }
     size_t select(unsigned sp, unsigned pc, unsigned cpsr, bool create = true) {
+        // A failed lookup remains a miss for the identical SP and CPU mode.
+        // No frames can appear without a call/enter/select(create), all of
+        // which invalidate this cache before the next instruction.
+        if (!create && missValid && missSp == sp && missMode == (cpsr & 31)) {
+            active = lanes.size();
+            return active;
+        }
         size_t best = lanes.size(); unsigned delta = ~0u;
         for (size_t n = 0; n < lanes.size(); ++n) {
             auto& lane = lanes[n];
@@ -26,7 +39,14 @@ template<class Frame> struct CallStackLens {
             const unsigned diff = distance(reference, sp);
             if (diff <= 0x2000 && diff < delta) { best = n; delta = diff; }
         }
-        if (best == lanes.size() && !create) { active = best; return best; }
+        if (best == lanes.size() && !create) {
+            active = best;
+            missValid = true;
+            missSp = sp;
+            missMode = cpsr & 31;
+            return best;
+        }
+        missValid = false;
         if (best == lanes.size()) { lanes.push_back({nextId++, sp, pc, cpsr, {}}); best = lanes.size() - 1; }
         active = best;
         if (lanes.size() > 128) { const size_t drop = active == 0 ? 1 : 0; lanes.erase(lanes.begin() + drop); if (active > drop) --active; }
