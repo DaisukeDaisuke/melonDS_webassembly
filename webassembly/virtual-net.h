@@ -17,6 +17,8 @@ static_assert(sizeof(WebNetFrame) == 2072);
 int WebNetEnqueue(int instanceId, const u8* data, int length, const u8* bssid = nullptr);
 int WebNetDrain(WebNetFrame* out, int capacity, u32* dropped);
 int WebNetDrainOutgoing(WebNetFrame* out, int capacity);
+int WebNetDiagnosticMode(bool enabled);
+int WebNetDrainDiagnostics(u32* out, int capacity);
 void WebNetClear(int instanceId);
 void WebNetClearAccessPoint(int instanceId, const u8* bssid);
 int WebNetSetEnabled(int instanceId, bool enabled);

@@ -2,6 +2,7 @@ import createModule from './dist/melonds.js';
 import pthreadSource from './dist/melonds.worker.js';
 import { decodeInstructions } from './disassemble.js';
 import { apBytes, apSecurity } from './ap-profile.js';
+import { wifiMetadata, wifiDiagnostic } from './wifi-metadata.js';
 
 export async function startEngine(moduleURL) {
 let wasm;
@@ -25,9 +26,10 @@ const inputWaiters = new Map();
 const cancelledOperations = new Set();
 const freezes = Array.from({ length: 16 }, () => new Map());
 const history = { 'local-log': [], 'wifi-log': [] };
+let wifiMetadataOnly = false;
 const HISTORY_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 2000 });
 function retainHistory(type, entries) {
-  const limit = HISTORY_RETENTION[type] || 2000;
+  const limit = type === 'wifi-log' && wifiMetadataOnly ? 20000 : HISTORY_RETENTION[type] || 2000;
   if (entries.length > limit) entries.splice(0, entries.length - limit);
 }
 const masks = Array(16).fill(0xfff);
@@ -101,7 +103,13 @@ function drainInput() {
   }
 }
 function execute(name, args) {
-  if (name === 'workspaceFlush') { drainLogs(true); drainWifiTx(); drainWifi(); return true; }
+  if (name === 'setWifiDiagnostics') {
+    success(call('web_net_diagnostic_mode', args.enabled ? 1 : 0), name);
+    wifiMetadataOnly = !!args.enabled;
+    history['wifi-log'] = [];
+    return true;
+  }
+  if (name === 'workspaceFlush') { drainLogs(true); drainWifiTx(); drainWifi(); drainWifiDiagnostics(); return true; }
   if (name === 'workspaceTransport') {
     if (args.data) {
       const result = withBytes(new Uint8Array(args.data), pointer => success(call('web_transport_import', pointer, args.data.length), name));
@@ -702,13 +710,26 @@ function drainWifi() {
       const length = call('web_net_log_entry', i, meta, payload, 2048);
       if (length < 0) continue;
       const view = new DataView(wasm.HEAPU8.buffer, meta, 20);
-      const bytes = Array.from(wasm.HEAPU8.slice(payload, payload + length));
-      emit({ type: 'wifi-log', instanceId: view.getInt32(8, true), direction: view.getUint32(12, true) ? 'RX' : 'TX',
+      const bytes = wasm.HEAPU8.slice(payload, payload + length);
+      const event = { type: 'wifi-log', instanceId: view.getInt32(8, true), direction: view.getUint32(12, true) ? 'RX' : 'TX',
         timestamp: `${view.getUint32(4, true)}:${view.getUint32(0, true)}`,
         packetType: length >= 14 ? `ETH ${bytes[12].toString(16).padStart(2, '0')}${bytes[13].toString(16).padStart(2, '0')}` : 'ETH',
-        length, dropped: view.getUint32(16, true), bssid: Array.from(wasm.HEAPU8.subarray(meta + 20, meta + 26)), payload: bytes });
+        length, dropped: view.getUint32(16, true), bssid: Array.from(wasm.HEAPU8.subarray(meta + 20, meta + 26)) };
+      emit(wifiMetadataOnly ? wifiMetadata(event, bytes) : { ...event, payload: Array.from(bytes) });
     }
   } finally { call('free', meta); call('free', payload); }
+}
+function drainWifiDiagnostics() {
+  if (!wifiMetadataOnly) return;
+  const capacity = 512, words = 10, pointer = call('malloc', capacity * words * 4);
+  if (!pointer) return;
+  try {
+    const count = call('web_net_diagnostic_read', pointer, capacity);
+    for (let i = 0; i < count; i++) {
+      const data = new Uint32Array(wasm.HEAPU8.buffer, pointer + i * words * 4, words);
+      emit(wifiDiagnostic(data));
+    }
+  } finally { call('free', pointer); }
 }
 function drainDebug() {
   const count = call('web_debug_event_count');
@@ -782,6 +803,7 @@ setInterval(() => {
   for (const id of ids) { pollFrame(id); pollAudio(id); }
   drainLogs();
   drainWifi();
+  drainWifiDiagnostics();
   drainDebug();
 }, 1000 / 60);
 }

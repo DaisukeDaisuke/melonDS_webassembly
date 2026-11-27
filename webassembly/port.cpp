@@ -1076,6 +1076,12 @@ EMSCRIPTEN_KEEPALIVE int web_net_backend_status(int id) {
     if (!get(id)) return -1;
     return melonDS::Platform::WebNetGetEnabled(id);
 }
+EMSCRIPTEN_KEEPALIVE int web_net_diagnostic_mode(int enabled) {
+    return melonDS::Platform::WebNetDiagnosticMode(enabled != 0);
+}
+EMSCRIPTEN_KEEPALIVE int web_net_diagnostic_read(melonDS::u32* out, int capacity) {
+    return melonDS::Platform::WebNetDrainDiagnostics(out, capacity);
+}
 EMSCRIPTEN_KEEPALIVE int web_net_log_count() {
     netLogCount = melonDS::Platform::WebNetDrain(netLogs.data(), netLogs.size(), &netLogDropped);
     return netLogCount;
