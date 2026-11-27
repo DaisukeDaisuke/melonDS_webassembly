@@ -20,10 +20,10 @@ set(ENABLE_LTO_RELEASE OFF CACHE BOOL "" FORCE)
 set(ENABLE_LTO OFF CACHE BOOL "" FORCE)
 add_subdirectory(../melonDS_w ${CMAKE_BINARY_DIR}/melonDS)
 target_compile_options(core PUBLIC -pthread)
-# Newer libc++ no longer exposes std::copy through unrelated headers in
-# melonDS_w/src/FreeBIOS.cpp. Supply <algorithm> to the core C++ translation
-# units without changing the pinned upstream submodule.
-target_compile_options(core PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include>" "$<$<COMPILE_LANGUAGE:CXX>:algorithm>")
+# The pinned melonDS core relies on headers included transitively by older
+# libc++. Emscripten 7 needs the core C++ compat header explicitly.
+# Keep the upstream submodule unchanged; this shim is WebAssembly-only.
+target_compile_options(core PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include>" "$<$<COMPILE_LANGUAGE:CXX>:${PROJECT_SOURCE_DIR}/emsdk7-compat.h>")
 target_compile_definitions(core PRIVATE WEB_DEBUGGER)
 target_include_directories(core PRIVATE ${PROJECT_SOURCE_DIR})
 target_compile_options(teakra PUBLIC -pthread)
