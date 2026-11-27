@@ -27,7 +27,7 @@ const cancelledOperations = new Set();
 const freezes = Array.from({ length: 16 }, () => new Map());
 const history = { 'local-log': [], 'wifi-log': [] };
 let wifiMetadataOnly = false;
-const HISTORY_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 2000 });
+const HISTORY_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 10000 });
 function retainHistory(type, entries) {
   const limit = type === 'wifi-log' && wifiMetadataOnly ? 20000 : HISTORY_RETENTION[type] || 2000;
   if (entries.length > limit) entries.splice(0, entries.length - limit);

@@ -11,6 +11,7 @@ import { renderDebuggerTool } from './debugger-ui.js';
 import { renderStorageTool } from './storage-ui.js';
 import { createAudioBus } from './audio.js';
 import { decodePacket } from './packet-decode.js';
+import { exportWifiMetadataCsv } from './wifi-metadata.js';
 import { installLanguageSwitcher } from './i18n.js';
 
 installLanguageSwitcher();
@@ -22,7 +23,7 @@ const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], names: new Map(), logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
 let wifiMetadataOnly = false, wifiModeChanging = false;
-const LOG_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 2000 });
+const LOG_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 10000 });
 const LOG_RENDER_LIMIT = 100;
 const LOCAL_PACKET_NAMES = Object.freeze(['PACKET', 'CMD', 'REPLY', 'ACK']);
 function retainLogs(type, list) {
@@ -268,6 +269,15 @@ function renderLog(body, tile) {
     }
     mode.value = wifiMetadataOnly ? 'metadata' : 'normal';
     controls.append(mode);
+    controls.append(button('CSV出力（最新1万件）', () => {
+      if (wifiModeChanging) throw Error('ログモードの切り替えが完了してから出力してください');
+      const csv = exportWifiMetadataCsv(state.logs['wifi-log'], {
+        instanceId: tile.instanceId, all: showAll.checked, metadataOnly: wifiMetadataOnly
+      });
+      if (!csv.count) throw Error('出力対象のWi-Fiログがありません');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      download(csv.text, `melonds-wifi-metadata-${stamp}.csv`, 'text/csv;charset=utf-8');
+    }));
     mode.onchange = async () => {
       if (wifiModeChanging) { mode.value = wifiMetadataOnly ? 'metadata' : 'normal'; return; }
       const enabled = mode.value === 'metadata';

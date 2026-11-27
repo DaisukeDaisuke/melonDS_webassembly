@@ -83,3 +83,45 @@ export function wifiDiagnostic(words) {
     decoded: { source: 'NET', destination: '#' + instanceId, protocol, summary,
       detail: protocol + '\n' + summary + '\nLength=' + length + '\nDropped diagnostic records=' + dropped } };
 }
+
+export const WIFI_CSV_LIMIT = 10000;
+
+// CSV is always metadata-only, even when the normal packet view contains raw
+// or application-decoded records. Reparse raw packets with the fixed-header
+// decoder rather than exporting potentially sensitive application text.
+function csvCell(value) {
+  let text = String(value ?? '');
+  // Guard spreadsheet formula injection for any restored/imported metadata.
+  if (/^[\s]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text)) text = "'" + text;
+  return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+export function exportWifiMetadataCsv(records, { instanceId, all = false, metadataOnly = false } = {}) {
+  const selected = [];
+  for (let i = records.length - 1; i >= 0 && selected.length < WIFI_CSV_LIMIT; i--) {
+    const packet = records[i];
+    if (!packet || packet.type !== 'wifi-log') continue;
+    if (!all && packet.instanceId !== instanceId) continue;
+    if (metadataOnly && packet.metadataOnly !== true) continue;
+    selected.push(packet);
+  }
+  selected.reverse();
+  const columns = ['timestamp', 'instance_id', 'direction', 'source', 'destination', 'protocol',
+    'length', 'summary', 'detail', 'bssid', 'dropped', 'diagnostic'];
+  const lines = [columns.join(',')];
+  for (const packet of selected) {
+    let safe;
+    if (packet.metadataOnly === true) safe = packet;
+    else if (packet.payload && !packet.logical) safe = wifiMetadata(packet, Uint8Array.from(packet.payload));
+    else {
+      // Logical application events can contain URLs, DNS names or bodies.
+      // Keep only the fact that an event occurred and basic numeric metadata.
+      safe = { ...packet, decoded: { protocol: 'Logical event', summary: '', detail: '' } };
+    }
+    const d = safe.decoded || {};
+    const bssid = Array.isArray(safe.bssid) || ArrayBuffer.isView(safe.bssid)
+      ? Array.from(safe.bssid, x => Number(x).toString(16).padStart(2, '0')).join(':') : '';
+    lines.push([safe.timestamp, safe.instanceId, safe.direction, d.source, d.destination, d.protocol,
+      safe.length, d.summary, d.detail, bssid, safe.dropped, safe.diagnostic ? 1 : 0].map(csvCell).join(','));
+  }
+  return { count: selected.length, text: '\ufeff' + lines.join('\r\n') + '\r\n' };
+}
