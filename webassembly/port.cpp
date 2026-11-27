@@ -3,6 +3,7 @@
 #include "NDSCart.h"
 #include "LocalMP.h"
 #include "virtual-net.h"
+#include "rx-ring-capacity.h"
 #include "web-debug-hooks.h"
 #include "desmume-state.h"
 #include <array>
@@ -1120,6 +1121,15 @@ LocalMP& localMultiplayer() { return localMP; }
 const u8* networkBssid(void* userdata) {
     auto* inst = static_cast<Instance*>(userdata);
     return inst && inst->nds ? inst->nds->Wifi.GetBSSID() : nullptr;
+}
+bool networkRxHasRoom(void* userdata, int ethernetLength) {
+    auto* inst = static_cast<Instance*>(userdata);
+    if (!inst || !inst->nds) return false;
+    auto& wifi = inst->nds->Wifi;
+    // Called by the Wi-Fi core on its own emulation thread.
+    return AccessPointRxHasRoom(ethernetLength,
+        wifi.Read(Wifi::W_RXBufBegin), wifi.Read(Wifi::W_RXBufEnd),
+        wifi.Read(Wifi::W_RXBufReadCursor), wifi.Read(Wifi::W_RXBufWriteCursor));
 }
 void updateMultiplayerPeer(void* userdata) {
     auto* inst = static_cast<Instance*>(userdata);

@@ -19,6 +19,7 @@ void saveNDSToInstance(const u8*, u32, void*);
 LocalMP& localMultiplayer();
 void updateMultiplayerPeer(void* userdata);
 const u8* networkBssid(void* userdata);
+bool networkRxHasRoom(void* userdata, int ethernetLength);
 static std::mutex netLock;
 static std::array<std::deque<WebNetFrame>, 16> netPending;
 static std::array<bool, 16> netEnabled = [] {
@@ -224,6 +225,13 @@ int Net_RecvPacket(u8* data, void* userdata) {
     auto& pending = netPending[instance];
     const auto* bssid = networkBssid(userdata);
     while (!pending.empty()) {
+        // A scripted AP has a reliable local queue, unlike over-the-air Wi-Fi.
+        // Do not consume its next Ethernet frame while the guest RX ring
+        // cannot fit it. Wifi::USTimer would otherwise abort the reception.
+        const auto& next = pending.front();
+        if (next.bssid != std::array<u8, 6>{} && bssid &&
+            std::equal(next.bssid.begin(), next.bssid.end(), bssid) &&
+            !networkRxHasRoom(userdata, next.length)) return 0;
         WebNetFrame frame = std::move(pending.front()); pending.pop_front();
         if (frame.bssid != std::array<u8, 6>{} && (!bssid || !std::equal(frame.bssid.begin(), frame.bssid.end(), bssid))) continue;
         memcpy(data, frame.data.data(), frame.length);

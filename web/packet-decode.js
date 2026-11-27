@@ -33,6 +33,28 @@ export function decodePacket(packet) {
     out.source = ip(b.subarray(26, 30)); out.destination = ip(b.subarray(30, 34));
     details.push(`IPv4 ${out.source} → ${out.destination} · TTL ${b[22]} · ID ${u16(b, 18)}`);
     if (ihl < 20 || p > end) return { ...out, protocol: 'IPv4', summary: 'Truncated IPv4 header', detail: details.join('\n') };
+    const fragment = u16(b, 20), offset = (fragment & 0x1fff) * 8, more = !!(fragment & 0x2000);
+    if (offset || more) {
+      const transport = ({ 6: 'TCP', 17: 'UDP', 1: 'ICMP' })[b[23]] || `IPv4/${b[23]}`;
+      out.protocol = `${transport} fragment`;
+      let size = end - p;
+      let datagram = '';
+      // Only the initial fragment can contain a transport header.
+      if (offset === 0 && b[23] === 17 && size >= 8) {
+        out.source += `:${u16(b, p)}`;
+        out.destination += `:${u16(b, p + 2)}`;
+        size -= 8;
+        const udpLength = u16(b, p + 4);
+        if (udpLength >= 8) datagram = ` · UDP datagram ${udpLength - 8} B`;
+      } else if (offset === 0 && b[23] === 6 && size >= 20) {
+        out.source += `:${u16(b, p)}`;
+        out.destination += `:${u16(b, p + 2)}`;
+      }
+      out.summary = `${size} B${datagram} · Offset ${offset} · MF=${Number(more)}`;
+      details.push(`IPv4 fragment · Offset ${offset} B · MF=${Number(more)}`, out.summary);
+      out.detail = details.join('\n');
+      return out;
+    }
     if (b[23] === 6 && p + 20 <= end) {
       const sp = u16(b, p), dp = u16(b, p + 2), size = (b[p + 12] >> 4) * 4;
       out.source += `:${sp}`; out.destination += `:${dp}`; out.protocol = 'TCP';

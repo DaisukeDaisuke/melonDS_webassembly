@@ -29,6 +29,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check custom AP RX ring capacity
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror webassembly/tests/rx-ring-capacity.cpp -o /tmp/rx-ring-test
+          /tmp/rx-ring-test
+
       - name: Get melonDS revision
         id: melonds-revision
         run: echo "sha=$(git -C melonDS_w rev-parse HEAD)" >> "$GITHUB_OUTPUT"
