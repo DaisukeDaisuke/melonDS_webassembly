@@ -12,7 +12,19 @@ await esbuild.build({
   entryPoints: [join(root, 'web/entry.js')], outfile: join(out, 'main.js'),
   bundle: true, minify: true, format: 'esm', platform: 'browser', target: ['chrome120'],
   legalComments: 'external', logLevel: 'info',
-  plugins: [{ name: 'pthread-source', setup(build) {
+  plugins: [{ name: 'pthread-versioned-url', setup(build) {
+    build.onLoad({ filter: /melonds\.js$/ }, async args => {
+      const source = await readFile(args.path, 'utf8');
+      const oldURL = 'new URL("melonds.js", import.meta.url)';
+      if (source.split(oldURL).length !== 2) {
+        throw Error('Unexpected Emscripten pthread worker URL: update the build patch');
+      }
+      // main.js is imported with ?v=<buildId>. Use the same query for the
+      // pthread module so an old cached melonds.js never receives CMD_LOAD=1.
+      const newURL = 'new URL("melonds.js" + new URL(import.meta.url).search, import.meta.url)';
+      return { contents: source.replace(oldURL, newURL), loader: 'js' };
+    });
+  } }, { name: 'pthread-source', setup(build) {
     build.onResolve({ filter: /melonds\.worker\.js$/ }, () => ({ path: 'pthread-bootstrap', namespace: 'pthread-source' }));
     build.onLoad({ filter: /.*/, namespace: 'pthread-source' }, async () => {
       // Older Emscripten emits a separate worker. Newer versions embed the
