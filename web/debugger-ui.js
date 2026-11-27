@@ -182,7 +182,24 @@ export function renderDebuggerTool(body, tile, node, { api, save, onError, jump 
   node._debugListener = event => { if (event.instanceId === tile.instanceId) { if (tile.type === 'debugger' || tile.type === 'disassembly') tile.settings.followPc = true; void refresh(); } };
   body.addEventListener('target-change', () => { revision++; previous.clear(); selectedLane = null; void refresh(); });
   body.addEventListener('address-jump', event => { if (event.detail.thumb !== undefined && mode) mode.value = event.detail.thumb ? 'thumb' : 'arm'; navigate(event.detail.address); });
-  const resize = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(refresh, 120); }); resize.observe(view);
+  // Watch the tile's outer dimensions, not the rendered table's scroll area.
+  // Replacing rows can change view geometry; it must not trigger another RPC.
+  let observedTileSize = null;
+  const resize = new ResizeObserver(([entry]) => {
+    if (closed || !entry) return;
+    const border = Array.isArray(entry.borderBoxSize) ? entry.borderBoxSize[0] : entry.borderBoxSize;
+    const width = Math.round(border?.inlineSize ?? entry.target.getBoundingClientRect().width);
+    const height = Math.round(border?.blockSize ?? entry.target.getBoundingClientRect().height);
+    if (width <= 0 || height <= 0) return;
+    const size = `${width}x${height}`;
+    if (observedTileSize === size) return;
+    // The initial observation is not a resize; the initial refresh is queued below.
+    if (observedTileSize === null) { observedTileSize = size; return; }
+    observedTileSize = size;
+    clearTimeout(timer);
+    timer = setTimeout(() => { if (!closed) void refresh(); }, 120);
+  });
+  resize.observe(node, { box: 'border-box' });
   node._cleanup = () => { closed = true; revision++; clearTimeout(timer); resize.disconnect(); };
   queueMicrotask(refresh);
   return true;
