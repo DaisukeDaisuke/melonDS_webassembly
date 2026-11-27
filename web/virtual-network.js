@@ -27,8 +27,8 @@ function networkOptions({ address = '10.0.0.1', clientAddress = '10.0.0.100', ne
     if (!host || host === hostMask || !ip[0] || ip[0] >= 224) throw new RangeError('Expected unicast host addresses');
   }
   if (typeof dhcp !== 'boolean') throw new TypeError('network.dhcp must be a boolean');
-  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1480 || fragmentBytes % 8) {
-    throw new RangeError('network.fragmentBytes must be a multiple of 8 from 8 to 1480');
+  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1976 || fragmentBytes % 8) {
+    throw new RangeError('network.fragmentBytes must be a multiple of 8 from 8 to 1976');
   }
   return { address: server.join('.'), clientAddress: client.join('.'), netmask: mask.join('.'), dhcp, fragmentBytes };
 }

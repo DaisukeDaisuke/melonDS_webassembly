@@ -83,3 +83,17 @@ test('experiment-only tiny IPv4 fragments preserve offsets and reassemble UDP', 
   assert.throws(() => createLanService({ fragmentBytes: 10 }), /multiple of 8/);
   assert.throws(() => createLanService({ fragmentBytes: 1488 }), /multiple of 8/);
 });
+
+test('experimental jumbo IPv4 MTU sends a 1888-byte UDP segment in one frame', () => {
+  const lan = createLanService({ address: '192.168.0.200', dhcp: false, fragmentBytes: 1920 });
+  try {
+    // 1880 data bytes + UDP header (8) = 1888 bytes.
+    const payload = new Uint8Array(1880);
+    const frame = lan.sendUdp({ address: '255.255.255.255', port: 58881, sourcePort: 58881, data: payload });
+    assert.ok(frame instanceof Uint8Array);
+    assert.equal(frame.length, 1922);
+    assert.equal(read16(frame, 20) & 0x3fff, 0);
+    assert.equal(checksum(frame.subarray(14, 34)), 0);
+    assert.throws(() => createLanService({ fragmentBytes: 1984 }), /1976/);
+  } finally { lan.close(); }
+});

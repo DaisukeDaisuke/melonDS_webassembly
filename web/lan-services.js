@@ -30,8 +30,8 @@ export function portNumber(value) {
 function udpFrame({ sourceMac, targetMac, sourceIp, targetIp, sourcePort, targetPort, payload, ipId = 0, fragmentBytes = 1480 }) {
   if (!(payload instanceof Uint8Array) || payload.length > 65507) throw new RangeError('UDP payload must be a Uint8Array of 0..65507 bytes');
   portNumber(sourcePort); portNumber(targetPort);
-  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1480 || fragmentBytes % 8) {
-    throw new RangeError('UDP fragmentBytes must be a multiple of 8 from 8 to 1480');
+  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1976 || fragmentBytes % 8) {
+    throw new RangeError('UDP fragmentBytes must be a multiple of 8 from 8 to 1976');
   }
   const udp = new Uint8Array(8 + payload.length);
   write16(udp, 0, sourcePort); write16(udp, 2, targetPort);
@@ -65,8 +65,8 @@ function udpReply(frame, { broadcast = false, ...fields }) {
 
 export function createLanService({ address = '10.0.0.1', clientAddress = '10.0.0.100', mac = macDefault,
   netmask = '255.255.255.0', dhcp = true, fragmentBytes = 1480, domains = {}, domainSuffixes = [], ignoreUnknownDomains = false, interceptDns = false } = {}) {
-  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1480 || fragmentBytes % 8) {
-    throw new RangeError('UDP fragmentBytes must be a multiple of 8 from 8 to 1480');
+  if (!Number.isInteger(fragmentBytes) || fragmentBytes < 8 || fragmentBytes > 1976 || fragmentBytes % 8) {
+    throw new RangeError('UDP fragmentBytes must be a multiple of 8 from 8 to 1976');
   }
   const ip = ipv4(address);
   const clientIp = ipv4(clientAddress);
