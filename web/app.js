@@ -11,7 +11,6 @@ import { renderDebuggerTool } from './debugger-ui.js';
 import { renderStorageTool } from './storage-ui.js';
 import { createAudioBus } from './audio.js';
 import { decodePacket } from './packet-decode.js';
-import { exportWifiMetadataCsv } from './wifi-metadata.js';
 import { installLanguageSwitcher } from './i18n.js';
 
 installLanguageSwitcher();
@@ -22,12 +21,11 @@ const layout = loadLayout();
 const backend = createScriptBackend(createWasmBackend());
 const api = createApi(backend);
 const state = { instances: [], names: new Map(), logs: { 'local-log': [], 'wifi-log': [] }, pending: new Set() };
-let wifiMetadataOnly = false, wifiModeChanging = false;
-const LOG_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 10000 });
+const LOG_RETENTION = Object.freeze({ 'local-log': 10000, 'wifi-log': 2000 });
 const LOG_RENDER_LIMIT = 100;
 const LOCAL_PACKET_NAMES = Object.freeze(['PACKET', 'CMD', 'REPLY', 'ACK']);
 function retainLogs(type, list) {
-  const limit = type === 'wifi-log' && wifiMetadataOnly ? 20000 : LOG_RETENTION[type] || 2000;
+  const limit = LOG_RETENTION[type] || 2000;
   if (list.length > limit) list.splice(0, list.length - limit);
 }
 const dirtyLogs = new Set();
@@ -54,7 +52,7 @@ const audio = createAudioBus({ onTargets: ids => backend.setAudioTargets(ids), o
 globalThis.melondsAudio = Object.freeze({ stats: () => audio.stats() });
 globalThis.melonds = api;
 globalThis.melondsVirtualNetwork = createVirtualNetwork(api, { onEvent: event => {
-  if (event.type !== 'wifi-log' || wifiMetadataOnly || wifiModeChanging) return;
+  if (event.type !== 'wifi-log') return;
   state.logs['wifi-log'].push(event);
   retainLogs('wifi-log', state.logs['wifi-log']);
   queueLogUpdate('wifi-log');
@@ -67,7 +65,6 @@ globalThis.melondsWorkspace = createWorkspaceService({ api, backend, network: gl
   async restoreUI(saved, scripts) {
     Object.assign(layout, migrateWorkspaceLayout(saved.layout));
     state.names = new Map(saved.names); state.logs = saved.logs;
-    if (wifiMetadataOnly) state.logs['wifi-log'] = [];
     for (const script of scripts) {
       if (!layout.tiles.some(tile => tile.type === 'persistent-scripts' && tile.instanceId === script.instanceId && tile.settings.code === script.code)) {
         layout.tiles.push(makeTile('persistent-scripts', { instanceId: script.instanceId, settings: { code: script.code, name: script.name } }));
@@ -262,44 +259,6 @@ function renderLog(body, tile) {
     }));
   }
   if (tile.type === 'wifi-log') {
-    const mode = el('select');
-    mode.setAttribute('aria-label', 'Wi-Fi ログモード');
-    for (const [value, label] of [['normal', '通常パケットログ'], ['metadata', '全メタデータ診断（本文なし）']]) {
-      const option = el('option', '', label); option.value = value; mode.append(option);
-    }
-    mode.value = wifiMetadataOnly ? 'metadata' : 'normal';
-    controls.append(mode);
-    controls.append(button('CSV出力（最新1万件）', () => {
-      if (wifiModeChanging) throw Error('ログモードの切り替えが完了してから出力してください');
-      const csv = exportWifiMetadataCsv(state.logs['wifi-log'], {
-        instanceId: tile.instanceId, all: showAll.checked, metadataOnly: wifiMetadataOnly
-      });
-      if (!csv.count) throw Error('出力対象のWi-Fiログがありません');
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      download(csv.text, `melonds-wifi-metadata-${stamp}.csv`, 'text/csv;charset=utf-8');
-    }));
-    mode.onchange = async () => {
-      if (wifiModeChanging) { mode.value = wifiMetadataOnly ? 'metadata' : 'normal'; return; }
-      const enabled = mode.value === 'metadata';
-      wifiModeChanging = true; mode.disabled = true;
-      try {
-        await backend.execute('setWifiDiagnostics', { enabled });
-        wifiMetadataOnly = enabled; state.logs['wifi-log'] = [];
-      } catch (error) { errorMessage(error); }
-      finally {
-        wifiModeChanging = false; mode.disabled = false;
-        for (const node of workspace.querySelectorAll('[data-type="wifi-log"]')) {
-          node.querySelector('.tile-body').dispatchEvent(new Event('wifi-mode-change'));
-        }
-      }
-    };
-    body.addEventListener('wifi-mode-change', () => {
-      mode.value = wifiMetadataOnly ? 'metadata' : 'normal';
-      decodedOnly.disabled = wifiMetadataOnly;
-      selectedPacket = null; detail.textContent = ''; detail.hidden = true;
-      tbody.replaceChildren(); empty.hidden = false; update();
-    });
-    decodedOnly.disabled = wifiMetadataOnly;
     controls.append(button('DQ9 WFC 接続', async () => {
       await globalThis.melondsVirtualNetwork.registerDq9WfcFromSameOrigin({ instanceId: tile.instanceId });
       await api.setNetworkBackend({ instanceId: tile.instanceId, backend: 'virtual' });
@@ -320,7 +279,7 @@ function renderLog(body, tile) {
     const log = state.logs[tile.type];
     for (let index = log.length - 1; index >= 0 && entries.length < LOG_RENDER_LIMIT; index--) {
       const packet = log[index];
-      if ((tile.type === 'wifi-log' && wifiMetadataOnly ? packet.metadataOnly : (!tile.settings.decodedOnly || packet.logical)) &&
+      if ((!tile.settings.decodedOnly || packet.logical) &&
         (tile.settings.all || packet.instanceId === tile.instanceId || packet.destination === tile.instanceId)) entries.push(packet);
     }
     entries.reverse();
@@ -1137,7 +1096,6 @@ api.subscribe(event => {
     return;
   }
   if (!['local-log', 'wifi-log'].includes(event.type) || !Number.isInteger(event.instanceId)) return;
-  if (event.type === 'wifi-log' && (wifiModeChanging || !!event.metadataOnly !== wifiMetadataOnly)) return;
   const list = state.logs[event.type]; list.push(event);
   retainLogs(event.type, list);
   queueLogUpdate(event.type);

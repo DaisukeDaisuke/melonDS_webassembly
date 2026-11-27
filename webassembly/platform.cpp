@@ -3,7 +3,6 @@
 #include "virtual-net.h"
 #include "Savestate.h"
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -16,6 +15,9 @@
 #include <vector>
 
 namespace melonDS::Platform {
+// The newer melonDS core still calls this optional diagnostic hook.
+// Keep it inert after reverting the Wi-Fi metadata diagnostics feature.
+void WebWifiTrace(void*, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) {}
 void saveNDSToInstance(const u8*, u32, void*);
 LocalMP& localMultiplayer();
 void updateMultiplayerPeer(void* userdata);
@@ -29,94 +31,21 @@ static std::array<bool, 16> netEnabled = [] {
 static std::deque<WebNetFrame> netEvents;
 static std::deque<WebNetFrame> netOutgoing;
 static u32 netDropped = 0;
-// Diagnostic events contain only numeric link/network metadata, never frame data.
-static std::atomic<bool> netMetadataOnly{false};
-static std::mutex netDiagLock;
-static std::deque<std::array<u32, 10>> netDiagnostics;
-static u32 netDiagDropped = 0;
-static std::array<bool, 16> netWaitReported{};
-static void traceWifi(int instance, unsigned stage, unsigned length,
-                      unsigned a, unsigned b, unsigned c, unsigned d) {
-    if (!netMetadataOnly.load() || instance < 0 || instance >= 16) return;
-    const u64 time = GetUSCount();
-    std::lock_guard<std::mutex> lock(netDiagLock);
-    if (!netMetadataOnly.load()) return;
-    if (netDiagnostics.size() >= 8192) { netDiagnostics.pop_front(); ++netDiagDropped; }
-    netDiagnostics.push_back({u32(time), u32(time >> 32), u32(instance), stage, length, a, b, c, d, 0});
-}
-void WebWifiTrace(void* userdata, unsigned stage, unsigned length,
-                  unsigned a, unsigned b, unsigned c, unsigned d) {
-    traceWifi(userdata ? *static_cast<int*>(userdata) : -1, stage, length, a, b, c, d);
-}
-int WebNetDiagnosticMode(bool enabled) {
-    std::lock_guard<std::mutex> lock(netLock);
-    std::lock_guard<std::mutex> diagLock(netDiagLock);
-    netMetadataOnly.store(enabled);
-    netEvents.clear(); netDropped = 0;
-    netDiagnostics.clear(); netDiagDropped = 0; netWaitReported.fill(false);
-    return 0;
-}
-int WebNetDrainDiagnostics(u32* out, int capacity) {
-    if (!out || capacity <= 0) return 0;
-    std::lock_guard<std::mutex> lock(netDiagLock);
-    int count = std::min(capacity, static_cast<int>(netDiagnostics.size()));
-    for (int i = 0; i < count; ++i) {
-        auto event = netDiagnostics.front(); netDiagnostics.pop_front();
-        event[9] = netDiagDropped;
-        std::copy(event.begin(), event.end(), out + i * event.size());
-    }
-    if (count) netDiagDropped = 0;
-    return count;
-}
-static unsigned net16(const u8* data, int offset) {
-    return (unsigned(data[offset]) << 8) | data[offset + 1];
-}
-static void traceQueue(int instance, unsigned stage, const u8* data, int length, unsigned depth) {
-    if (!netMetadataOnly.load()) return;
-    const bool ip = length >= 34 && net16(data, 12) == 0x0800 && (data[14] >> 4) == 4;
-    traceWifi(instance, stage, length, ip ? net16(data, 18) : 0xFFFFFFFFu,
-              ip ? net16(data, 20) : 0, depth, ip ? data[23] : 0);
-}
-// Keep only fixed protocol headers needed for metadata display. Never retain
-// application bytes, IPv4 options, TCP options or unknown EtherType contents.
-static WebNetFrame metadataFrame(const WebNetFrame& frame) {
-    WebNetFrame result = frame;
-    result.data.fill(0);
-    const auto* data = frame.data.data();
-    const int n = frame.length;
-    if (n < 14) return result;
-    std::copy_n(data, 14, result.data.begin());
-    const unsigned type = net16(data, 12);
-    if (type == 0x0806 && n >= 42 && data[18] == 6 && data[19] == 4) {
-        std::copy_n(data + 14, 28, result.data.begin() + 14);
-    } else if (type == 0x0800 && n >= 34 && (data[14] >> 4) == 4) {
-        std::copy_n(data + 14, 20, result.data.begin() + 14);
-        const int ihl = (data[14] & 15) * 4, total = net16(data, 16);
-        const int start = 14 + ihl, end = std::min(n, 14 + total);
-        if (ihl < 20 || start > end || (net16(data, 20) & 0x1FFF)) return result;
-        const int header = data[23] == 17 ? 8 : data[23] == 6 ? 20 : data[23] == 1 ? 4 : 0;
-        if (header && start + header <= end)
-            std::copy_n(data + start, header, result.data.begin() + start);
-    }
-    return result;
-}
 int WebNetEnqueue(int instanceId, const u8* data, int length, const u8* bssid) {
     if (instanceId < 0 || instanceId >= 16 || !data || length < 14 || length > 2048) return -1;
     std::lock_guard<std::mutex> lock(netLock);
-    if (!netEnabled[instanceId]) { traceQueue(instanceId, 6, data, length, netPending[instanceId].size()); return -3; }
-    if (netPending[instanceId].size() >= 256) { traceQueue(instanceId, 2, data, length, netPending[instanceId].size()); return -2; }
+    if (!netEnabled[instanceId]) return -3;
+    if (netPending[instanceId].size() >= 256) return -2;
     WebNetFrame frame {GetUSCount(), instanceId, length, true, {}, {}};
     memcpy(frame.data.data(), data, length);
     if (bssid) std::copy_n(bssid, 6, frame.bssid.begin());
     netPending[instanceId].push_back(frame);
-    traceQueue(instanceId, 1, data, length, netPending[instanceId].size());
     return length;
 }
 void WebNetClear(int instanceId) {
     if (instanceId < 0 || instanceId >= 16) return;
     std::lock_guard<std::mutex> lock(netLock);
     netPending[instanceId].clear();
-    netWaitReported[instanceId] = false;
     netOutgoing.erase(std::remove_if(netOutgoing.begin(), netOutgoing.end(), [=](const WebNetFrame& frame) { return frame.instanceId == instanceId; }), netOutgoing.end());
 }
 void WebNetClearAccessPoint(int instanceId, const u8* bssid) {
@@ -134,8 +63,6 @@ int WebNetSetEnabled(int instanceId, bool enabled) {
     std::lock_guard<std::mutex> lock(netLock);
     netEnabled[instanceId] = enabled;
     netPending[instanceId].clear();
-    netWaitReported[instanceId] = false;
-    traceWifi(instanceId, 7, 0, enabled, 0, 0, 0);
     if (!enabled) netOutgoing.erase(std::remove_if(netOutgoing.begin(), netOutgoing.end(), [=](const WebNetFrame& frame) { return frame.instanceId == instanceId; }), netOutgoing.end());
     return 0;
 }
@@ -164,7 +91,7 @@ int WebNetDrainOutgoing(WebNetFrame* out, int capacity) {
 }
 static void recordNet(const WebNetFrame& frame) {
     if (netEvents.size() >= 512) { netEvents.pop_front(); ++netDropped; }
-    netEvents.push_back(netMetadataOnly.load() ? metadataFrame(frame) : frame);
+    netEvents.push_back(frame);
 }
 struct FileHandle { FILE* stream; };
 struct Thread { std::thread worker; };
@@ -307,20 +234,9 @@ int Net_RecvPacket(u8* data, void* userdata) {
         const auto& next = pending.front();
         if (next.bssid != std::array<u8, 6>{} && bssid &&
             std::equal(next.bssid.begin(), next.bssid.end(), bssid) &&
-            !networkRxHasRoom(userdata, next.length)) {
-            if (!netWaitReported[instance]) {
-                traceQueue(instance, 3, next.data.data(), next.length, pending.size());
-                netWaitReported[instance] = true;
-            }
-            return 0;
-        }
+            !networkRxHasRoom(userdata, next.length)) return 0;
         WebNetFrame frame = std::move(pending.front()); pending.pop_front();
-        netWaitReported[instance] = false;
-        if (frame.bssid != std::array<u8, 6>{} && (!bssid || !std::equal(frame.bssid.begin(), frame.bssid.end(), bssid))) {
-            traceQueue(instance, 5, frame.data.data(), frame.length, pending.size());
-            continue;
-        }
-        traceQueue(instance, 4, frame.data.data(), frame.length, pending.size());
+        if (frame.bssid != std::array<u8, 6>{} && (!bssid || !std::equal(frame.bssid.begin(), frame.bssid.end(), bssid))) continue;
         memcpy(data, frame.data.data(), frame.length);
         recordNet(frame);
         return frame.length;
