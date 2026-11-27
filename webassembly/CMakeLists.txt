@@ -3,13 +3,13 @@ project(melonds_web LANGUAGES C CXX)
 if(NOT EMSCRIPTEN)
   message(FATAL_ERROR "Configure with emcmake cmake")
 endif()
-# Restore the historical -O2 Release optimization while retaining the Debug
-# build's -g3 DWARF symbols for C++/Wasm profiling and abort diagnosis.
+# Compare -Os code generation against the previously frozen -O2 build while
+# retaining -g3 DWARF symbols for C++/Wasm profiling and abort diagnosis.
 # Assertions remain disabled; LTO stays off so debugger symbols are preserved.
-set(WASM_DEBUG_FLAGS "-O2 -g3 -DNDEBUG -D_LIBCPP_ASSERTIONS=0 -D_LIBCPP_ENABLE_ASSERTIONS=0")
+set(WASM_DEBUG_FLAGS "-Os -g3 -DNDEBUG -D_LIBCPP_ASSERTIONS=0 -D_LIBCPP_ENABLE_ASSERTIONS=0")
 set(CMAKE_C_FLAGS_DEBUG "${WASM_DEBUG_FLAGS}" CACHE STRING "" FORCE)
 set(CMAKE_CXX_FLAGS_DEBUG "${WASM_DEBUG_FLAGS}" CACHE STRING "" FORCE)
-set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-O2 -g3 -sASSERTIONS=0" CACHE STRING "" FORCE)
+set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-Os -g3 -sASSERTIONS=0" CACHE STRING "" FORCE)
 set(BUILD_QT_SDL OFF CACHE BOOL "" FORCE)
 set(ENABLE_JIT OFF CACHE BOOL "" FORCE)
 set(ENABLE_OGLRENDERER OFF CACHE BOOL "" FORCE)
@@ -27,9 +27,9 @@ target_compile_options(core PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include>" "$<$<C
 target_compile_definitions(core PRIVATE WEB_DEBUGGER)
 target_include_directories(core PRIVATE ${PROJECT_SOURCE_DIR})
 target_compile_options(teakra PUBLIC -pthread)
-# melonDS_w adds -Og to teakra in Debug builds; our later -O2 wins.
+# melonDS_w adds -Og to teakra in Debug builds; our later -Os wins.
 # The upstream workaround applies to native Windows builds, not Emscripten.
-target_compile_options(teakra PRIVATE "$<$<CONFIG:Debug>:-O2>")
+target_compile_options(teakra PRIVATE "$<$<CONFIG:Debug>:-Os>")
 add_executable(melonds port.cpp platform.cpp desmume-state.cpp disassembler-port.cpp vendor/desmume-source/Disassembler.cpp ../melonDS_w/src/net/LocalMP.cpp)
 target_link_libraries(melonds PRIVATE core)
 target_include_directories(melonds PRIVATE ../melonDS_w/src ../melonDS_w/src/net)
