@@ -265,7 +265,7 @@ const ap = await melondsVirtualNetwork.createAccessPoint({
   tcp: { 8080: { onData: async (data, peer) => data } }
 });
 ```
-`data` は UDP データグラムまたは順序どおりに届く TCP ストリームの一部分を表す `Uint8Array`。TCPでメッセージ境界が必要な場合はハンドラで蓄積する。`address` / `port` は相手、`localAddress` / `localPort` はAP側。戻り値の `Uint8Array` を応答として送り、`undefined` または `null` で応答を省略する。`network.dhcp: false` ではDS側に固定IPを設定する。DHCPが有効なとき、UDPポート67はDHCPが使う。
+`data` は UDP データグラムまたは順序どおりに届く TCP ストリームの一部分を表す `Uint8Array`。TCPでメッセージ境界が必要な場合はハンドラで蓄積する。`address` / `port` は相手、`localAddress` / `localPort` はAP側。戻り値の `Uint8Array`、`ArrayBuffer`、バイナリビュー（`DataView` 等）の指定範囲をそのままアプリケーションペイロードとして送る。内容の解析・文字コード変換・アプリケーションプロトコルによる加工は行わない。UDP/IPヘッダー、チェックサム、IPフラグメント、TCPのシーケンス番号・ACK・セグメント分割などの通信処理はAP側が担当する。`undefined` または `null` で応答を省略する。UDPは `udp: { 486: { handlePacket: async packet => packet.data } }`、TCPは `tcp: { 8080: { handlePacket: async (data, peer) => data } }` でも登録できる（既存の関数形式・`onData` も引き続き使用可能）。TCPでは従来の `{ data, close }` 形式も使用できる。`network.dhcp: false` ではDS側に固定IPを設定する。DHCPが有効なとき、UDPポート67はDHCPが使う。
 `await ap.sendUdp({address: '255.255.255.255', port: 486, data})` でAPから送信できる。`address` を省略すると `clientAddress` になり、ユニキャスト送信はAPがDSのMACを学習した後に使用できる。`await ap.close()` でAPを取り除く。スクリプトAPを開いている間の `.mel` 全体保存は、任意のハンドラを復元できないためエラーになる。
 
 ## 8. 全体保存 .mel

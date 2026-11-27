@@ -115,7 +115,10 @@ test('TCP answers handshake and paces HTTP response by client ACK', async () => 
   assert.equal(fin[0][47] & 1, 1);
 });
 
-test('scripted AP dispatches decoded UDP and TCP payloads by BSSID and port', async () => {
+test('scripted AP dispatches opaque UDP and TCP payloads by BSSID and port', async () => {
+  const udpResponse = Uint8Array.of(0, 255, 128, 65, 13, 10, 0);
+  const tcpResponse = Uint8Array.of(71, 69, 84, 0, 255, 128, 13, 10);
+  const padded = Uint8Array.of(99, ...udpResponse, 88);
   const replies = [], received = [], operations = [];
   let emit;
   const network = createVirtualNetwork({
@@ -127,8 +130,8 @@ test('scripted AP dispatches decoded UDP and TCP payloads by BSSID and port', as
   try {
     const ap = await network.createAccessPoint({ instanceId: 0, ssid: 'TestAP', channel: 9,
       network: { address: '192.168.0.200', clientAddress: '192.168.0.176', netmask: '255.255.255.128', dhcp: false },
-      udp: { 486: async packet => { received.push(packet); return Uint8Array.of(7); } },
-      tcp: { 8080: { async onData(data, peer) { received.push({ ...peer, data }); return Uint8Array.of(8); } } } });
+      udp: { 486: { async handlePacket(packet) { received.push(packet); return new DataView(padded.buffer, 1, udpResponse.length); } } },
+      tcp: { 8080: { async handlePacket(data, peer) { received.push({ ...peer, data }); return tcpResponse.buffer; } } } });
     const other = await network.createAccessPoint({ instanceId: 0, ssid: 'Other' });
     const [created, otherCreated] = operations;
     assert.equal(created.channel, 9);
@@ -156,7 +159,8 @@ test('scripted AP dispatches decoded UDP and TCP payloads by BSSID and port', as
     assert.deepEqual(replies[0].bssid, created.bssid);
     assert.equal(u16(replies[0].data, 34), 486);
     assert.equal(u16(replies[0].data, 36), 12345);
-    assert.equal(replies[0].data[42], 7);
+    assert.equal(u16(replies[0].data, 38), 8 + udpResponse.length);
+    assert.deepEqual(replies[0].data.subarray(42), udpResponse);
     const tcp = (seq, ack, flags, payload = []) => {
       const bytes = frame(6, payload);
       put16(bytes, 36, 8080); put32(bytes, 38, seq); put32(bytes, 42, ack);
@@ -170,7 +174,7 @@ test('scripted AP dispatches decoded UDP and TCP payloads by BSSID and port', as
     await send(tcp(101, ack, 0x18, [4]));
     assert.deepEqual(received[1], { address: '192.168.0.176', port: 12345, localAddress: '192.168.0.200',
       localPort: 8080, data: Uint8Array.of(4) });
-    assert.equal(replies.at(-1).data[54], 8);
+    assert.deepEqual(replies.at(-1).data.subarray(54), tcpResponse);
     await send(tcp(101, ack, 0x18, [4]));
     assert.equal(received.length, 2);
     await ap.close();

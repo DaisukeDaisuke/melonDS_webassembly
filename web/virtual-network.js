@@ -14,6 +14,24 @@ function handlersByPort(handlers, getHandler) {
   }));
 }
 
+// Application responses are opaque bytes; only the transport adds headers.
+function opaquePayload(value) {
+  if (value == null || value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  throw new TypeError('AP response must be a binary payload');
+}
+
+function opaqueTcpResponse(value) {
+  if (value == null || value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    return opaquePayload(value);
+  }
+  if (typeof value === 'object' && ('data' in value || value.close === true)) {
+    return { data: opaquePayload(value.data), close: value.close === true };
+  }
+  throw new TypeError('AP TCP response must be a binary payload or response envelope');
+}
+
 function networkOptions({ address = '10.0.0.1', clientAddress = '10.0.0.100', netmask = '255.255.255.0', dhcp = true, fragmentBytes = 1480 }) {
   const server = ipv4(address), client = ipv4(clientAddress), mask = ipv4(netmask);
   const maskBits = (mask[0] << 24) | (mask[1] << 16) | (mask[2] << 8) | mask[3];
@@ -91,8 +109,8 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
     instanceId(id);
     if (!Number.isInteger(channel) || channel < 1 || channel > 14) throw new RangeError('Channel must be 1..14');
     const config = networkOptions(network);
-    const udpHandlers = handlersByPort(udp, handler => handler);
-    const tcpListeners = new Map([...handlersByPort(tcp, listener => listener?.onData)].map(([port, onData]) => [port, { onData }]));
+    const udpHandlers = handlersByPort(udp, handler => typeof handler === 'function' ? handler : handler?.handlePacket);
+    const tcpListeners = handlersByPort(tcp, listener => typeof listener === 'function' ? listener : listener?.onData ?? listener?.handlePacket);
     if (config.dhcp && udpHandlers.has(67)) throw new RangeError('UDP port 67 is reserved by this AP’s DHCP server');
     return mutateAccessPoints(id, async () => {
       const points = accessPoints.get(id) || new Map();
@@ -103,14 +121,16 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
       const macKey = mac.join(':');
       if (points.has(macKey)) throw Error('An access point already uses that BSSID');
       const lan = createLanService({ ...config, mac });
-      for (const [port, handler] of udpHandlers) lan.bindUdp(port, handler);
+      for (const [port, handler] of udpHandlers) lan.bindUdp(port, async packet => opaquePayload(await handler(packet)));
       const emitFrame = data => {
         if (!isCurrent()) throw Error('The virtual access point is closed');
         return sendFrames(id, data, mac);
       };
       const stream = createTcpService({ address: config.address, mac, emitFrame,
         onDiagnostic: message => diagnostic(id, 'TCP', message, message) });
-      for (const [port, handlers] of tcpListeners) stream.listen(port, handlers);
+      for (const [port, handler] of tcpListeners) stream.listen(port, { async onData(data, peer) {
+        return opaqueTcpResponse(await handler(data, peer));
+      } });
       const point = { slot, onFrame: frame => lan(frame) || stream(frame), emitFrame,
         close: () => { lan.close(); stream.close(); },
         suspend: stream.suspend, resume: stream.resume, settle: stream.settle };
@@ -123,7 +143,7 @@ export function createVirtualNetwork(api, { onEvent = () => {} } = {}) {
         network: Object.freeze(config),
         async sendUdp(message) {
           if (suspended) throw Error('Virtual network is suspended');
-          return emitFrame(lan.sendUdp(message));
+          return emitFrame(lan.sendUdp({ ...message, data: opaquePayload(message.data) }));
         },
         peers: lan.peers,
         close: () => mutateAccessPoints(id, async () => {
