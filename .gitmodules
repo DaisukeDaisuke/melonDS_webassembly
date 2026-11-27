@@ -2,6 +2,7 @@
 	path = melonDS_w
 	url = git@github.com:DaisukeDaisukeForks/melonDS_w.git
 	shallow = true
+	branch = web-wifi-metadata-diagnostics-20261127
 [submodule "interface-design"]
 	path = interface-design
 	url = git@github.com:Dammyjay93/interface-design.git
